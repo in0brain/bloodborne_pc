@@ -724,6 +724,7 @@ typedef struct {
     float x0, y0, x1, y1;      /* stage bounds, valid with bounds_ns; a point when approx */
     uint64_t bounds_ns, seen_ns;
     int approx;                /* from display info: the item's origin only */
+    int absent;                /* a list's clip that shows no entry (a dialog's second button, rows past the end) */
 } MenuItem;
 /* active_ns: when its selection last moved or its items were first found (the newest is on top:
  * a submenu over the menu that is still drawn behind it). */
@@ -806,7 +807,7 @@ static int item_index(uint64_t container, int a, int b) {
 static int item_add(uint64_t oi, uint64_t container, int a, int b, uint64_t now) {
     const int i=item_index(container,a,b);
     MenuItem *m=&menu_items[i];
-    if (m->container!=container || m->a!=a || m->b!=b) *m=(MenuItem){oi,container,0,0,a,b,0,0,0,0,0,now,0};
+    if (m->container!=container || m->a!=a || m->b!=b) *m=(MenuItem){oi,container,0,0,a,b,0,0,0,0,0,now,0,0};
     m->seen_ns=now;
     return i;
 }
@@ -1014,16 +1015,20 @@ static void scan_container(uint64_t oi, uint64_t container, int probe_now, int m
  * origins (display info), the nearest one within APPROX_RADIUS pitches of its cell's middle
  * (origins at the top left, as the cursors' offsets suggest), along the axes the items spread on
  * (a column gives no width: the pointer only has to be near its side of the screen). */
+/* An item to point at: measured, with a cursor, showing something. */
+static int pointable(const MenuItem *m, uint64_t container) {
+    return m->container==container && m->cursor && m->bounds_ns && !m->absent;
+}
 /* The spacing of a container's measured items: the smallest gap between top left corners along a
  * row (x) and along a column (y); 0 where they do not spread. */
 static void pitches(uint64_t container, int approx, float *pitch_x, float *pitch_y) {
     *pitch_x=*pitch_y=0;
     for (int i=0;i<menu_item_count;++i) {
         const MenuItem *m=&menu_items[i];
-        if (m->container!=container || !m->cursor || !m->bounds_ns || m->approx!=approx || (!approx && m->x1<=m->x0)) continue;
+        if (!pointable(m,container) || m->approx!=approx || (!approx && m->x1<=m->x0)) continue;
         for (int j=i+1;j<menu_item_count;++j) {
             const MenuItem *n=&menu_items[j];
-            if (n->container!=container || !n->cursor || !n->bounds_ns || n->approx!=approx || (!approx && n->x1<=n->x0)) continue;
+            if (!pointable(n,container) || n->approx!=approx || (!approx && n->x1<=n->x0)) continue;
             const float dx=m->x0>n->x0 ? m->x0-n->x0 : n->x0-m->x0, dy=m->y0>n->y0 ? m->y0-n->y0 : n->y0-m->y0;
             if (dx>2 && dy<=8 && (!*pitch_x || dx<*pitch_x)) *pitch_x=dx;
             if (dy>2 && dx<=8 && (!*pitch_y || dy<*pitch_y)) *pitch_y=dy;
@@ -1043,7 +1048,7 @@ static int hit(uint64_t container, float sx, float sy) {
     pitches(container,0,&pitch_x,&pitch_y);
     for (int i=0;i<menu_item_count;++i) {
         const MenuItem *m=&menu_items[i];
-        if (m->container!=container || !m->cursor || !m->bounds_ns) continue;
+        if (!pointable(m,container)) continue;
         if (m->approx) { approx=1; continue; }
         float r[4];
         hit_rect(m,pitch_x,pitch_y,r);
@@ -1054,10 +1059,10 @@ static int hit(uint64_t container, float sx, float sy) {
     pitch_x=pitch_y=0;
     for (int i=0;i<menu_item_count;++i) {
         const MenuItem *m=&menu_items[i];
-        if (m->container!=container || !m->cursor || !m->bounds_ns || !m->approx) continue;
+        if (!pointable(m,container) || !m->approx) continue;
         for (int j=i+1;j<menu_item_count;++j) {
             const MenuItem *n=&menu_items[j];
-            if (n->container!=container || !n->cursor || !n->bounds_ns || !n->approx) continue;
+            if (!pointable(n,container) || !n->approx) continue;
             const float dx=m->x0>n->x0 ? m->x0-n->x0 : n->x0-m->x0, dy=m->y0>n->y0 ? m->y0-n->y0 : n->y0-m->y0;
             if (dx>2 && (!pitch_x || dx<pitch_x)) pitch_x=dx;
             if (dy>2 && (!pitch_y || dy<pitch_y)) pitch_y=dy;
@@ -1065,7 +1070,7 @@ static int hit(uint64_t container, float sx, float sy) {
     }
     for (int i=0;i<menu_item_count;++i) {
         const MenuItem *m=&menu_items[i];
-        if (m->container!=container || !m->cursor || !m->bounds_ns || !m->approx) continue;
+        if (!pointable(m,container) || !m->approx) continue;
         float ex=0, ey=0;
         if (pitch_x) ex=(sx-(m->x0+pitch_x/2))/pitch_x;
         else if (sx<m->x0-100 || sx>m->x0+900) continue;
@@ -1186,6 +1191,8 @@ static ABI void list_update(uint64_t list, uint64_t input) {
     c->list=list; c->list_ns=c->touch_ns=now; c->behind=0; c->unanswered=0;
     const int selected=list_clip(&s,s.selected,&row,&column) ? item_add(oi,container,row,column,now) : -1;
     if (selected!=c->selected) { c->selected=selected; c->select_ns=c->active_ns=now; }
+    for (int i=0;i<menu_item_count;++i) /* clips past the entries: hidden, maybe over the shown ones */
+        if (menu_items[i].container==container) menu_items[i].absent=list_entry(&s,menu_items[i].a,menu_items[i].b)<0;
     const int take=jump_state==JUMP_POSTED && jump_list==list;
     if (take) { a=jump_a; b=jump_b; entry=list_entry(&s,a,b); jump_state=JUMP_TAKEN; }
     const int probe_now=!c->probe_ns || now-c->probe_ns>PROBE_NS;
