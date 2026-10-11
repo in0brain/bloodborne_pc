@@ -735,6 +735,7 @@ typedef struct {
                                 * know, like the equipment slots), until its selection moves again */
     uint64_t covered_ns;
     uint64_t list, list_ns;    /* the list widget showing its items, and its last update */
+    int list_rows, list_columns; /* its clips (one row of several: a bar, like an inventory's tabs) */
     int selected, unanswered;
 } MenuContainer;
 #define COVERED UINT64_MAX
@@ -1188,7 +1189,7 @@ static ABI void list_update(uint64_t list, uint64_t input) {
     MenuContainer *c=container_of(container,1);
     const int fresh=c->list!=list || now-c->list_ns>=LIST_LIVE_NS;
     if (fresh) c->active_ns=now; /* (back) in front: a submenu over the menu that is still drawn */
-    c->list=list; c->list_ns=c->touch_ns=now; c->behind=0; c->unanswered=0;
+    c->list=list; c->list_ns=c->touch_ns=now; c->behind=0; c->unanswered=0; c->list_rows=s.rows; c->list_columns=s.columns;
     const int selected=list_clip(&s,s.selected,&row,&column) ? item_add(oi,container,row,column,now) : -1;
     if (selected!=c->selected) { c->selected=selected; c->select_ns=c->active_ns=now; }
     for (int i=0;i<menu_item_count;++i) /* clips past the entries: hidden, maybe over the shown ones */
@@ -1264,13 +1265,24 @@ static void list_configure(unsigned char *code) {
  * pointer adds. Moving onto an item makes it the target, reached with d-pad presses toward it;
  * keys and the wheel stay free otherwise (a resting pointer does not pull the selection back).
  * The left button targets the item under the pointer and confirms on it; the right one cancels. */
+/* A list the game updates now: it takes input, alone or sharing the screen with another (an
+ * inventory's tab bar and its items). */
+static int live_list(const MenuContainer *c, uint64_t now) {
+    return c && c->list && now-c->list_ns<LIST_LIVE_NS && !c->behind;
+}
+/* An item the pointer may act on: in the menu on top, or in any live list beside it. */
+static int pointable_item(int item, const MenuContainer *menu, uint64_t now) {
+    if (item<0 || item>=menu_item_count) return 0;
+    if (menu_items[item].container==menu->container) return 1;
+    return live_list(menu,now) && live_list(container_of(menu_items[item].container,0),now);
+}
 static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int window_h, uint32_t free_buttons) {
     const uint64_t now=host_monotonic_ns();
     uint32_t out=0;
     host_lock(&menu_lock);
     /* The menu on screen: the container whose selection moved last, among those touched lately. */
     MenuContainer *menu=NULL;
-    int menus=0;
+    int menus=0, live_lists=0;
     for (int i=0;i<MAX_CONTAINERS;++i) {
         MenuContainer *c=&containers[i];
         if (c->behind==COVERED) { if (c->select_ns>c->covered_ns) c->behind=0; }
@@ -1282,6 +1294,7 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
         const int items=cursor_items(c->container);
         if (!c->container || now-c->touch_ns>=MENU_IDLE_NS || (c->list ? items<1 : (c->selected<0 && items<2))) continue;
         ++menus;
+        live_lists+=live_list(c,now);
         const int lost=c->list && now-c->list_ns>=LIST_LIVE_NS; /* its list is no longer updated: covered */
         if (!c->behind && !lost && (!menu || c->active_ns>menu->active_ns)) menu=c;
     }
@@ -1297,7 +1310,13 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
     const int shown=menus>0; /* the mouse stays free over a covered menu, but takes no steps there */
     int hovered=-1;
     const int selected=menu ? menu->selected : -1;
-    if (menu && window_w>0 && window_h>0) hovered=hit(menu->container,pointer_x*STAGE_W/window_w,pointer_y*STAGE_H/window_h);
+    if (menu && window_w>0 && window_h>0) {
+        const float sx=pointer_x*STAGE_W/window_w, sy=pointer_y*STAGE_H/window_h;
+        hovered=hit(menu->container,sx,sy);
+        /* Lists sharing the screen: the pointer works in each one the game updates. */
+        for (int i=0;i<MAX_CONTAINERS && hovered<0 && live_list(menu,now);++i)
+            if (&containers[i]!=menu && live_list(&containers[i],now)) hovered=hit(containers[i].container,sx,sy);
+    }
     int moved=pointer_x!=last_pointer_x || pointer_y!=last_pointer_y;
     last_pointer_x=pointer_x; last_pointer_y=pointer_y;
     if (shown!=menu_shown) {
@@ -1321,38 +1340,51 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
     const uint32_t pressed=free_buttons&~previous_free;
     previous_free=free_buttons;
     if (!shown || !menu) { host_unlock(&menu_lock); return 0; }
-    /* A list jumps once per item the pointer moves onto (a jump may scroll other entries under it). */
-    const int direct=menu->list && now-menu->list_ns<LIST_LIVE_NS;
+    /* A list jumps once per item the pointer moves onto, whichever list it is in (a jump may
+     * scroll other entries under it; a d-pad move elsewhere is not undone by a resting pointer). */
+    const int direct=live_list(menu,now);
     if (direct) { if (moved && hovered>=0 && hovered!=last_hovered && hovered!=blocked) nav_target=hovered; }
     else if (moved && hovered>=0 && hovered!=nav_target && hovered!=blocked) { nav_target=hovered; steps=visited_count=0; }
     last_hovered=hovered;
     if (hovered!=blocked) blocked=-1;
     if ((pressed&1) && hovered>=0) { nav_target=confirm_target=hovered; steps=visited_count=0; }
-    if (nav_target>=0 && menu_items[nav_target].container!=menu->container) nav_target=confirm_target=-1;
+    if (!pointable_item(nav_target,menu,now)) nav_target=-1;
+    if (!pointable_item(confirm_target,menu,now)) confirm_target=-1;
+    /* The list the target is in (the menu on top, or a live list beside it). */
+    const int target=nav_target>=0 ? nav_target : confirm_target;
+    MenuContainer *lc=direct && target>=0 ? container_of(menu_items[target].container,0) : NULL;
+    if (!lc) lc=menu;
     if (press_until) {
         if (now<press_until) { out=press_button; goto done; }
         gap_until=press_until+GAP_NS; /* from the press's end, however late this sample is */
         if (press_button&(PAD_UP|PAD_DOWN|PAD_LEFT|PAD_RIGHT)) settle_until=press_until+SETTLE_NS;
         press_until=0;
     }
-    if (now<gap_until || now-menu->select_ns<REFRESH_NS) goto done;
+    if (now<gap_until || now-lc->select_ns<REFRESH_NS) goto done;
     if (direct) {
         if (jump_state==JUMP_DONE) {
             jump_state=JUMP_IDLE;
-            if (!jump_moved && jump_target>=0 && jump_target!=selected) { /* an entry it cannot select */
+            const MenuContainer *jumped=jump_target>=0 ? container_of(menu_items[jump_target].container,0) : NULL;
+            if (!jump_moved && jump_target>=0 && (!jumped || jump_target!=jumped->selected)) { /* an entry it cannot select */
                 blocked=jump_target;
                 if (nav_target==jump_target) nav_target=-1;
                 if (confirm_target==jump_target) confirm_target=-1;
             }
         } else if (jump_state==JUMP_POSTED && now-jump_ns>LIST_LIVE_NS) jump_state=JUMP_IDLE; /* its list went */
-        if (nav_target>=0 && nav_target==selected) nav_target=-1;
+        if (nav_target>=0 && nav_target==lc->selected) nav_target=-1;
+        /* A bar (one row of three or more) beside another list, like an inventory's tabs, only
+         * switches: the confirm button acts on the other list's selection. A box's buttons (OK,
+         * yes/no) are one row of one or two. */
+        const int bar=live_lists>1 && lc->list_rows==1 && lc->list_columns>=3;
         if (pressed&4) {
             press_button=cancel_button; press_until=now+PRESS_NS; nav_target=confirm_target=-1; menu_note("cancel");
         } else if (nav_target>=0 && jump_state==JUMP_IDLE) {
-            jump_list=menu->list; jump_a=menu_items[nav_target].a; jump_b=menu_items[nav_target].b;
+            jump_list=lc->list; jump_a=menu_items[nav_target].a; jump_b=menu_items[nav_target].b;
             jump_target=nav_target; jump_ns=now; jump_state=JUMP_POSTED;
             nav_target=-1;
-        } else if (confirm_target>=0 && confirm_target==selected && jump_state==JUMP_IDLE && now-menu->select_ns>=CONFIRM_NS) {
+        } else if (confirm_target>=0 && confirm_target==lc->selected && jump_state==JUMP_IDLE && bar) {
+            confirm_target=-1;
+        } else if (confirm_target>=0 && confirm_target==lc->selected && jump_state==JUMP_IDLE && now-lc->select_ns>=CONFIRM_NS) {
             press_button=confirm_button; press_until=now+PRESS_NS; confirm_target=-1; menu_note("confirm");
         }
         if (press_until) out=press_button;
