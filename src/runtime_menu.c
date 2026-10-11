@@ -359,8 +359,20 @@ static size_t trace_used, trace_dropped;
 static uint64_t slot_calls[INTERFACE_SLOTS];
 static float trace_pointer_x, trace_pointer_y;
 static int trace_window_w, trace_window_h;
-static RuntimeView *trace_views; /* taken when a trace begins: the probe's views are its own */
-static size_t trace_view_count;
+/* Guest memory views for reading call arguments (names live in the game's heap too): two
+ * buffers, the pad thread refreshes the idle one every VIEWS_NS and switches; a reader takes
+ * microseconds, far from the next refresh of the buffer it read. The probe's views are its own. */
+#define VIEWS_NS UINT64_C(1000000000)
+static RuntimeView *arg_views[2];
+static size_t arg_view_count[2];
+static int arg_views_current;
+static uint64_t arg_views_ns;
+static void refresh_arg_views(void) {
+    const int next=1-__atomic_load_n(&arg_views_current,__ATOMIC_ACQUIRE);
+    arg_view_count[next]=runtime_memory_views(arg_views[next],MAX_VIEWS);
+    __atomic_store_n(&arg_views_current,next,__ATOMIC_RELEASE);
+    arg_views_ns=host_monotonic_ns();
+}
 static uint32_t pad_buttons=UINT32_MAX;
 static uint8_t pad_x, pad_y;
 
@@ -377,7 +389,8 @@ static size_t read_host(uintptr_t p, unsigned char *out, size_t size) {
 }
 /* Bytes an argument points at: guest memory (backing view), the image, or the caller's stack. */
 static size_t read_arg(uintptr_t p, uintptr_t stack, unsigned char *out, size_t size) {
-    const RuntimeView *v=view_in(trace_views,trace_view_count,p);
+    const int current=__atomic_load_n(&arg_views_current,__ATOMIC_ACQUIRE);
+    const RuntimeView *v=view_in(arg_views[current],arg_view_count[current],p);
     if (v) {
         const uint64_t room=v->start+v->size-p;
         const size_t n=room<size ? (size_t)room : size;
@@ -511,14 +524,15 @@ static void trace_configure(void) {
             return;
         }
     trace_buffer=malloc(TRACE_BYTES);
-    trace_views=malloc(MAX_VIEWS*sizeof(*trace_views));
+    arg_views[0]=malloc(MAX_VIEWS*sizeof(*arg_views[0]));
+    arg_views[1]=malloc(MAX_VIEWS*sizeof(*arg_views[1]));
 #ifdef _WIN32
     unsigned char *code=VirtualAlloc(NULL,4096,MEM_RESERVE|MEM_COMMIT,PAGE_EXECUTE_READWRITE);
 #else
     unsigned char *code=mmap(NULL,4096,PROT_READ|PROT_WRITE|PROT_EXEC,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     if (code==MAP_FAILED) code=NULL;
 #endif
-    if (!code || !trace_buffer || !trace_views) { puts("Menu trace: off (no memory)"); return; }
+    if (!code || !trace_buffer || !arg_views[0] || !arg_views[1]) { puts("Menu trace: off (no memory)"); return; }
     memcpy(code,trace_common,sizeof(trace_common));
     const uint64_t target=(uint64_t)(uintptr_t)trace_call;
     memcpy(code+COMMON_IMM,&target,8);
@@ -535,7 +549,7 @@ static void trace_configure(void) {
 static void trace_begin(float pointer_x, float pointer_y, int window_w, int window_h) {
     if (!traceable || __atomic_load_n(&tracing,__ATOMIC_ACQUIRE)) return;
     host_lock(&trace_lock);
-    trace_view_count=runtime_memory_views(trace_views,MAX_VIEWS);
+    refresh_arg_views();
     trace_used=trace_dropped=0;
     memset(slot_calls,0,sizeof(slot_calls));
     trace_pointer_x=pointer_x; trace_pointer_y=pointer_y; trace_window_w=window_w; trace_window_h=window_h;
@@ -645,7 +659,11 @@ typedef struct {
 } MenuItem;
 /* active_ns: when its selection last moved or its items were first found (the newest is on top:
  * a submenu over the menu that is still drawn behind it). */
-typedef struct { uint64_t container, touch_ns, select_ns, probe_ns, active_ns; int selected; } MenuContainer;
+typedef struct {
+    uint64_t container, touch_ns, select_ns, probe_ns, active_ns;
+    uint64_t behind;           /* a press here moved this other container: in the background while it lives */
+    int selected;
+} MenuContainer;
 
 static int menu_mouse;
 static HostMutex menu_lock=HOST_MUTEX_INIT;
@@ -659,6 +677,7 @@ static int menu_shown, blocked=-1, nav_target=-1, confirm_target=-1, press_from=
 static int visited[MAX_VISITED], visited_count;
 static float last_pointer_x=-1, last_pointer_y=-1;
 static uint32_t press_button, previous_free;
+static uint64_t press_container, press_ns; /* where the last d-pad press was aimed, and when */
 static uint64_t press_until, gap_until, settle_until;
 static uint32_t confirm_button=PAD_CROSS, cancel_button=PAD_CIRCLE;
 
@@ -687,7 +706,7 @@ static MenuContainer *container_of(uint64_t container, int add) {
         if (containers[i].touch_ns<oldest->touch_ns) oldest=&containers[i];
     }
     if (!add) return NULL;
-    *oldest=(MenuContainer){container,host_monotonic_ns(),0,0,0,-1};
+    *oldest=(MenuContainer){container,host_monotonic_ns(),0,0,0,0,-1};
     return oldest;
 }
 static int item_index(uint64_t container, int a, int b) {
@@ -830,6 +849,10 @@ static void menu_observe(uint64_t slot, const uint64_t *regs) {
             if (m->container!=obj || m->a!=a || m->b!=b) *m=(MenuItem){regs[0],obj,0,0,a,b,0,0,0,0,0,now,0};
             m->seen_ns=now;
             pending_item=i;
+            if (__atomic_load_n(&menu_shown,__ATOMIC_RELAXED)) {
+                MenuContainer *c=container_of(obj,1);
+                if (!c->probe_ns || now-c->probe_ns>PROBE_NS) { c->probe_ns=now; probe_now=1; }
+            }
         } else if (!strcmp(name,"Cursor")) {
             pending_cursor=item_by(obj,0);
         } else if (!strcmp(name,"CurrentItem")) {
@@ -987,8 +1010,21 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
     MenuContainer *menu=NULL;
     for (int i=0;i<MAX_CONTAINERS;++i) {
         MenuContainer *c=&containers[i];
-        if (c->container && now-c->touch_ns<MENU_IDLE_NS && (c->selected>=0 || cursor_items(c->container)>=2) &&
+        if (c->behind) { /* back in front once the container that took the focus has closed */
+            const MenuContainer *front=container_of(c->behind,0);
+            if (!front || now-front->touch_ns>=MENU_IDLE_NS) c->behind=0;
+        }
+        if (c->container && !c->behind && now-c->touch_ns<MENU_IDLE_NS && (c->selected>=0 || cursor_items(c->container)>=2) &&
             (!menu || c->active_ns>menu->active_ns)) menu=c;
+    }
+    /* A press aimed at one container that another one answered: that one has the focus. */
+    if (press_container && menu && menu->container!=press_container && menu->select_ns>press_ns) {
+        MenuContainer *aimed=container_of(press_container,0);
+        if (aimed) {
+            aimed->behind=menu->container;
+            menu_note("container %" PRIx64 " answered a press aimed at %" PRIx64 ": it has the focus",menu->container,press_container);
+        }
+        press_container=0;
     }
     const int shown=menu!=NULL;
     int hovered=-1;
@@ -1054,11 +1090,13 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
         press_button=cancel_button; press_until=now+PRESS_NS; nav_target=confirm_target=-1; menu_note("cancel");
     } else if (nav_target>=0 && selected<0) { /* the selection is unknown: one press shows it */
         press_button=PAD_DOWN; press_until=now+PRESS_NS; press_from=selected; ++steps;
+        press_container=menu->container; press_ns=now;
         menu_note("toward Item_%d_%d: down (finds the selection)",menu_items[nav_target].a,menu_items[nav_target].b);
     } else if (nav_target>=0 && selected>=0) {
         if (!visited_count) visited[visited_count++]=selected;
         press_button=toward(&menu_items[selected],&menu_items[nav_target]);
         press_until=now+PRESS_NS; press_from=selected; ++steps;
+        press_container=menu->container; press_ns=now;
         menu_note("toward Item_%d_%d: %s",menu_items[nav_target].a,menu_items[nav_target].b,
                   press_button==PAD_UP ? "up" : press_button==PAD_DOWN ? "down" : press_button==PAD_LEFT ? "left" : "right");
     } else if (confirm_target>=0 && confirm_target==selected) {
@@ -1218,6 +1256,7 @@ uint32_t runtime_menu_update(unsigned probe_requests, unsigned trace_requests, f
     if (trace_requests!=seen &&
         __atomic_compare_exchange_n(&traces_seen,&seen,trace_requests,0,__ATOMIC_RELAXED,__ATOMIC_RELAXED))
         trace_begin(pointer_x,pointer_y,window_w,window_h);
+    if (traceable && host_monotonic_ns()-arg_views_ns>VIEWS_NS) refresh_arg_views();
     const uint32_t added=menu_mouse ? menu_pad(pointer_x,pointer_y,window_w,window_h,free_buttons) : 0;
     if (__atomic_load_n(&tracing,__ATOMIC_ACQUIRE)) {
         trace_pad(buttons|added,left_x,left_y);
