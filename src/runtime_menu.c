@@ -699,7 +699,8 @@ static const uint8_t list_set_selection_code[26]={0x55,0x48,0x89,0xE5,0x41,0x57,
                                                   0x48,0x81,0xEC,0xE8,0x00,0x00,0x00,0x41,0x89,0xF6,0x49,0x89,0xFC};
 static const char cursor_sound[]="\xE3\x82\xAB\xE3\x83\xBC\xE3\x82\xBD\xE3\x83\xAB\xE7\xA7\xBB\xE5\x8B\x95";
 /* The slider (v1.09): an options row's gauge, the clips "Bar", "LeftArrow" and "RightArrow"
- * under the row's, each held as a GFx::Value at +0x28 of a holder (vtable SLIDER_HOLDER). */
+ * under the row's, each in a holder (vtable SLIDER_HOLDER): a value wrapper at +0x28, its
+ * GFx::Value at +0x30 (the holder's getter, 0x1ADB830, reads the interface, type and clip). */
 #define SLIDER_UPDATE 0x1ADC970u      /* update(slider, input): every frame for every row, the input on in the selected one's */
 #define SLIDER_SET_VALUE 0x1ADCAA0u   /* SetValue(slider, value, notify, sound id, sound name): clamps, shows, tells, sounds */
 #define SLIDER_PROLOGUE 16            /* push rbp ... mov rbx,rdi */
@@ -707,7 +708,9 @@ static const char cursor_sound[]="\xE3\x82\xAB\xE3\x83\xBC\xE3\x82\xBD\xE3\x83\x
 #define SLIDER_BAR 0xA70              /* the holders */
 #define SLIDER_LEFT 0xB30
 #define SLIDER_RIGHT 0xB90
-#define HOLDER_VALUE 0x28
+#define HOLDER_OI 0x40
+#define HOLDER_TYPE 0x48
+#define HOLDER_CLIP 0x50
 #define SLIDER_MIN 0xBF0              /* ints */
 #define SLIDER_MAX 0xBF4
 #define SLIDER_VALUE 0xBF8
@@ -1335,13 +1338,6 @@ static int child_bounds(uint64_t oi, uint64_t container, const char *name, float
     value_release(&child);
     return ok;
 }
-/* The bounds of a clip the game holds as a GFx::Value at `value` (a display object of this
- * interface). */
-static int held_bounds(uint64_t value, float out[4]) {
-    const uint64_t oi=guest_u64(value+16), clip=guest_u64(value+32);
-    if (!oi || !clip || (guest_i32(value+24)&0x0F)!=10 || guest_u64(oi)!=(uintptr_t)image+OBJECT_INTERFACE) return 0;
-    return stage_bounds(oi,clip,out);
-}
 /* Measured parts into a control (none where a measurement failed). */
 static void control_parts(uint64_t object, const float part[PARTS][4], const int ok[PARTS]) {
     host_lock(&menu_lock);
@@ -1353,9 +1349,10 @@ static void control_parts(uint64_t object, const float part[PARTS][4], const int
     host_unlock(&menu_lock);
 }
 typedef ABI void (*SetValueFn)(uint64_t slider, int32_t value, int32_t notify, uint64_t sound, uint64_t name);
-/* A slider's state, and whether its clip holders are this class's (another layout is left alone).
- * Guarded, as list_read. */
-static int slider_read(uint64_t slider, uint64_t input, Control *out) {
+static const int slider_holders[PARTS]={SLIDER_LEFT,SLIDER_RIGHT,SLIDER_BAR};
+/* A slider's state and its clips (0 for one that is not a display object of this interface), and
+ * whether its clip holders are this class's (another layout is left alone). Guarded, as list_read. */
+static int slider_read(uint64_t slider, uint64_t input, Control *out, uint64_t *oi, uint64_t clip[PARTS]) {
     RuntimeRecoverBuf recover;
     RuntimeRecoverBuf *previous=runtime_fault_recover;
     if (RUNTIME_RECOVER_SET(recover)) { runtime_fault_recover=previous; return 0; }
@@ -1367,6 +1364,12 @@ static int slider_read(uint64_t slider, uint64_t input, Control *out) {
         out->min=guest_i32(slider+SLIDER_MIN); out->max=guest_i32(slider+SLIDER_MAX);
         out->value=guest_i32(slider+SLIDER_VALUE); out->step=guest_i32(slider+SLIDER_STEP);
         out->focused=!input || *(const volatile uint8_t *)(uintptr_t)input!=0;
+        for (int k=0;k<PARTS;++k) {
+            const uint64_t h=slider+slider_holders[k], held=guest_u64(h+HOLDER_OI);
+            clip[k]=guest_u64(h+HOLDER_CLIP);
+            if (!held || !clip[k] || (guest_i32(h+HOLDER_TYPE)&0x0F)!=10 || guest_u64(held)!=(uintptr_t)image+OBJECT_INTERFACE) clip[k]=0;
+            else *oi=held;
+        }
     }
     runtime_fault_recover=previous;
     return ok;
@@ -1378,7 +1381,8 @@ static ABI void slider_update(uint64_t slider, uint64_t input) {
     if (!menu_mouse) return;
     const uint64_t now=host_monotonic_ns();
     Control s;
-    if (!slider_read(slider,input,&s)) return;
+    uint64_t oi=0, clip[PARTS]={0,0,0};
+    if (!slider_read(slider,input,&s,&oi,clip)) return;
     int value=0;
     host_lock(&menu_lock);
     Control *c=control_of(slider,1);
@@ -1389,20 +1393,28 @@ static ABI void slider_update(uint64_t slider, uint64_t input) {
     if (measure_now) c->bounds_ns=now;
     const int take=slider_state==JUMP_POSTED && slider_target==slider && s.focused;
     if (take) { value=slider_relative ? s.value+slider_value*(s.step>0 ? s.step : 1) : slider_value; slider_state=JUMP_TAKEN; }
+    int first=0;
+    for (int i=0;fresh && measure_now && i<MAX_LIST_NOTES;++i) {
+        if (noted_lists[i]==slider) break;
+        if (!noted_lists[i]) { noted_lists[i]=slider; first=1; break; }
+    }
     host_unlock(&menu_lock);
     if (fresh) menu_note("slider %" PRIx64 ": %d in %d..%d by %d%s",slider,s.value,s.min,s.max,s.step,s.focused ? ", focused" : "");
     if (measure_now) {
-        static const int holders[PARTS]={SLIDER_LEFT,SLIDER_RIGHT,SLIDER_BAR};
         float part[PARTS][4]={{0}};
         int ok[PARTS];
         measuring=1;
-        for (int k=0;k<PARTS;++k) ok[k]=held_bounds(slider+holders[k]+HOLDER_VALUE,part[k]);
+        for (int k=0;k<PARTS;++k) ok[k]=clip[k] && stage_bounds(oi,clip[k],part[k]);
         measuring=0;
         control_parts(slider,(const float (*)[4])part,ok);
-        if (fresh)
+        if (fresh || !ok[PART_BAR])
             menu_note("slider %" PRIx64 ": bar (%.0f,%.0f)-(%.0f,%.0f), arrows %.0f..%.0f and %.0f..%.0f",slider,
                       part[PART_BAR][0],part[PART_BAR][1],part[PART_BAR][2],part[PART_BAR][3],
                       part[PART_LEFT][0],part[PART_LEFT][2],part[PART_RIGHT][0],part[PART_RIGHT][2]);
+        if (first)
+            printf("Menu mouse: slider %" PRIx64 " (%d in %d..%d), bar (%.0f,%.0f)-(%.0f,%.0f)%s\n",slider,s.value,s.min,s.max,
+                   part[PART_BAR][0],part[PART_BAR][1],part[PART_BAR][2],part[PART_BAR][3],
+                   ok[PART_LEFT] && ok[PART_RIGHT] ? "" : ", arrows not measured");
     }
     if (take) {
         ((SetValueFn)(uintptr_t)(image+SLIDER_SET_VALUE))(slider,value,1,SLIDER_SOUND_ID,(uintptr_t)image+SLIDER_SOUND);
