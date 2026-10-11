@@ -5,6 +5,14 @@
 
 static int capture;
 int bbgpu_overlay_captures_input(void) { return capture; }
+static BbGpuKeyboardMouse keyboard;
+static int camera_stick=-1;
+static float camera_dx;
+void bbgpu_keyboard_mouse(BbGpuKeyboardMouse *state) { *state=keyboard; keyboard.mouse_dx=keyboard.mouse_dy=0; }
+void runtime_camera_update(float dx, float dy, int captured, float sensitivity, int invert_y, int stick_camera) {
+    (void)dy; (void)captured; (void)sensitivity; (void)invert_y;
+    camera_dx=dx; camera_stick=stick_camera;
+}
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
     (void)table; (void)count; (void)name;
     return 0;
@@ -38,6 +46,25 @@ int main(void) {
     assert(pad_read_state(1,&data)==0 && data.touch_count==1 && data.touches[0].x==1440);
     inject(path,"");
     assert(pad_read_state(1,&data)==0 && data.buttons==0 && data.touch_count==0);
+    /* Keyboard and mouse: bindings add buttons and replace a stick; the mouse turns the camera
+     * until the right stick is used. */
+    keyboard.held=(1u<<BBGPU_PAD_R3)|(1u<<BBGPU_PAD_L2)|(1u<<BBGPU_PAD_MOVE_UP)|(1u<<BBGPU_PAD_MOVE_RIGHT);
+    keyboard.mouse_dx=12.0f;
+    keyboard.captured=1;
+    assert(pad_read_state(1,&data)==0);
+    assert((data.buttons & (BTN_R3|BTN_L2))==(BTN_R3|BTN_L2) && data.l2==255);
+    assert(data.left_x==255 && data.left_y==0 && data.right_x==128);
+    assert(camera_dx==12.0f && camera_stick==0);
+    keyboard.held=1u<<BBGPU_PAD_CAMERA_LEFT;
+    assert(pad_read_state(1,&data)==0 && data.right_x==0 && camera_stick==1);
+    /* Walking: the movement keys push the stick walk_scale far, diagonals to the same length. */
+    keyboard.held=(1u<<BBGPU_PAD_MOVE_UP)|(1u<<BBGPU_PAD_WALK);
+    keyboard.walk_scale=0.4f;
+    assert(pad_read_state(1,&data)==0 && data.left_x==128 && data.left_y==128-51);
+    keyboard.held|=1u<<BBGPU_PAD_MOVE_RIGHT;
+    assert(pad_read_state(1,&data)==0 && data.left_x==128+36 && data.left_y==128-36);
+    memset(&keyboard,0,sizeof(keyboard));
+    assert(pad_read_state(1,&data)==0 && data.buttons==0 && data.right_x==128);
 
     SDL_VirtualJoystickTouchpadDesc touch={.nfingers=2};
     SDL_VirtualJoystickDesc desc;
@@ -79,5 +106,6 @@ int main(void) {
     assert(SDL_DetachVirtualJoystick(id));
     SDL_Quit();
     unlink(path);
-    puts("PASS: pad ABI, debug camera chord, left/right clicks, SDL touch coordinates, overlay capture");
+    puts("PASS: pad ABI, debug camera chord, left/right clicks, keyboard and mouse bindings, "
+         "SDL touch coordinates, overlay capture");
 }

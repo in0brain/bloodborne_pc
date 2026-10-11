@@ -43,6 +43,7 @@ private:
     int text_state{};
     std::string text, text_prompt, base_title;
     void UpdateTextTitle();
+    bool fullscreen_applied{}; ///< the last fullscreen state asked of SDL (bbport.ini fullscreen)
     SDL_Window* window{};
     WindowSystemInfo window_info{};
 };
