@@ -104,5 +104,9 @@ void MakeBackground() {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
 }
 
+void MakeForeground() {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+}
+
 } // namespace BbThreads
 #endif
