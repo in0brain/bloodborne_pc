@@ -873,6 +873,7 @@ int main(int argc, char **argv) {
     if (!executable_entry) fail("entry is not executable");
     printf("Mapped %" PRIu64 " bytes, %" PRIu64 " segments; applied %" PRIu64 " relocations\n", size, ns, nr);
     runtime_camera_configure(image, size);
+    runtime_menu_configure(image, size);
     if (native_libc) {
         for (uint64_t m=0;m<module_count;++m) {
             int init_executable=0;

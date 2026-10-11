@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "sdl_window.h"
+#include "bbport_cursor.h"
 #include "bbport_input.h"
 #include "bbport_overlay.h"
 #include "bbport_settings.h"
@@ -152,6 +153,7 @@ bool WindowSDL::PollEvents() {
         SDL_SetWindowFullscreen(window, fullscreen);
     }
     BbInput::UpdateCapture(window, text_active);
+    BbCursor::Update(window);
     return is_open;
 }
 

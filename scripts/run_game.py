@@ -224,6 +224,9 @@ def ignore_interrupts():
 LOGS_KEPT = 10
 
 
+ANSI_COLOR = re.compile(rb'\x1b\[[0-9;]*m')
+
+
 def run_logged(command, logs):
     """Windows: bb-probe's output (unbuffered stdout and stderr) goes to the console and to
     logs/bbport-<time>.log in the data folder, each line there with the time of day (to set beside
@@ -243,6 +246,11 @@ def run_logged(command, logs):
         log.write(f'bbport {time.strftime("%Y-%m-%d %H:%M:%S")}\nCommand: {quoted(command)}\n'.encode())
         log.write(''.join(f'{k}={v}\n' for k, v in sorted(os.environ.items()) if k.startswith('BB_')).encode())
         log.flush()
+        # Colours: the console interprets escape sequences (some lines are highlighted); the log
+        # gets the text without them.
+        mode = console_mode()
+        if mode is not None and console_mode(mode | 0x0004) is not None:  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            os.environ['BB_CONSOLE_COLOR'] = '1'
         child = subprocess.Popen([str(c) for c in command], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         console = sys.stdout.buffer
         interrupted = False
@@ -261,7 +269,7 @@ def run_logged(command, logs):
             for piece in chunk.splitlines(keepends=True):
                 if line_start:
                     log.write(stamp)
-                log.write(piece)
+                log.write(ANSI_COLOR.sub(b'', piece))
                 line_start = piece.endswith(b'\n')
             log.flush()
         status = child.wait()

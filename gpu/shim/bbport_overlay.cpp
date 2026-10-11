@@ -9,6 +9,7 @@
 #include <mutex>
 
 #include <SDL3/SDL.h>
+#include "bbport_cursor.h"
 #include "bbport_i18n.h"
 #include "bbport_settings.h"
 #include "imgui.h"
@@ -65,7 +66,7 @@ void SetOpen(bool value) {
     if (menu_open.exchange(value) == value) {
         return;
     }
-    ImGui::GetIO().MouseDrawCursor = value;
+    ImGui::GetIO().MouseDrawCursor = value && !BbCursor::Active(); // else the art is the cursor
     if (!value && dirty) {
         dirty = false;
         BbSettings::Save();
