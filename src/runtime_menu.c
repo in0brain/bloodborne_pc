@@ -641,8 +641,9 @@ static void trace_finish(void) {
  * the hook calls the widget's SetSelection, then tells its listener (the dialog: description,
  * help text) and requests the cursor sound, as the update does after a key press. A list the game
  * stops updating has lost the focus (a screen over it, like the equipment slots over the in-game
- * menu): the mouse stays free, but its items take nothing. Menus without a list widget take d-pad
- * steps as above. */
+ * menu): the mouse stays free, but its items take nothing. An options screen shows each row's
+ * value as a list of one clip beside the row's name: pointing at a value selects its row. Menus
+ * without a list widget take d-pad steps as above. */
 #define MAX_ITEMS 256
 #define MAX_CONTAINERS 16
 #define STAGE_W 1920.0f
@@ -724,6 +725,7 @@ typedef struct {
     float x0, y0, x1, y1;      /* stage bounds, valid with bounds_ns; a point when approx */
     uint64_t bounds_ns, seen_ns;
     int approx;                /* from display info: the item's origin only */
+    int whole;                 /* the item's bounds, not its cursor's (hidden text may widen them) */
     int absent;                /* a list's clip that shows no entry (a dialog's second button, rows past the end) */
 } MenuItem;
 /* active_ns: when its selection last moved or its items were first found (the newest is on top:
@@ -809,7 +811,7 @@ static int item_index(uint64_t container, int a, int b) {
 static int item_add(uint64_t oi, uint64_t container, int a, int b, uint64_t now) {
     const int i=item_index(container,a,b);
     MenuItem *m=&menu_items[i];
-    if (m->container!=container || m->a!=a || m->b!=b) *m=(MenuItem){oi,container,0,0,a,b,0,0,0,0,0,now,0,0};
+    if (m->container!=container || m->a!=a || m->b!=b) *m=(MenuItem){.oi=oi,.container=container,.a=a,.b=b,.seen_ns=now};
     m->seen_ns=now;
     return i;
 }
@@ -854,9 +856,10 @@ static int bounds_of(uint64_t oi, uint64_t clip, const GfxValue *stage, float ou
 }
 /* An item's bounds on the stage, through the interface's originals (not traced). The container is
  * alive (the game is calling it), so the item is fetched from it afresh and never kept: menus
- * rebuild their clips. getBounds(stage) where the interface reaches AS3 properties; else the
- * item's and the container's display info (x, y, scale) give the item's origin (*approx). */
-static int measure(uint64_t oi, uint64_t container, int a, int b, float out[4], int *approx) {
+ * rebuild their clips. getBounds(stage) where the interface reaches AS3 properties: the cursor's,
+ * else the item's (*whole); else the item's and the container's display info (x, y, scale) give
+ * the item's origin (*approx). */
+static int measure(uint64_t oi, uint64_t container, int a, int b, float out[4], int *approx, int *whole) {
     const GetMemberFn get=(GetMemberFn)interface_original[5];
     const DisplayFn display=(DisplayFn)interface_original[28];
     GfxValue item, stage;
@@ -864,7 +867,7 @@ static int measure(uint64_t oi, uint64_t container, int a, int b, float out[4], 
     char name[24];
     snprintf(name,sizeof(name),"Item_%d_%d",a,b);
     int ok=0;
-    *approx=0;
+    *approx=*whole=0;
     if ((get(oi,container,name,&item,1)&0xFF) && (item.type&0x0F)==10) {
         if ((get(oi,item.value,"stage",&stage,1)&0xFF) && ((stage.type&0x0F)==10 || (stage.type&0x0F)==8)) {
             GfxValue cursor;
@@ -872,7 +875,7 @@ static int measure(uint64_t oi, uint64_t container, int a, int b, float out[4], 
             if ((get(oi,item.value,"Cursor",&cursor,1)&0xFF) && (cursor.type&0x0F)==10)
                 ok=bounds_of(oi,cursor.value,&stage,out) && out[2]-out[0]>4 && out[3]-out[1]>4;
             value_release(&cursor);
-            if (!ok) ok=bounds_of(oi,item.value,&stage,out);
+            if (!ok) ok=*whole=bounds_of(oi,item.value,&stage,out);
         }
         if (!ok) {
             double di[64], ci[64]; /* DisplayInfo: x, y, rotation, xscale, yscale (percent), alpha, ... */
@@ -998,14 +1001,14 @@ static void scan_container(uint64_t oi, uint64_t container, int probe_now, int m
         if (index<0) break;
         ++n;
         float r[4]={0,0,0,0};
-        int approx=0;
+        int approx=0, whole=0;
         measuring=1;
-        const int ok=measure(oi,container,m.a,m.b,r,&approx);
+        const int ok=measure(oi,container,m.a,m.b,r,&approx,&whole);
         measuring=0;
         host_lock(&menu_lock);
         MenuItem *t=&menu_items[index];
         if (t->container==container && t->a==m.a && t->b==m.b) {
-            if (ok) { t->x0=r[0]; t->y0=r[1]; t->x1=r[2]; t->y1=r[3]; t->approx=approx; }
+            if (ok) { t->x0=r[0]; t->y0=r[1]; t->x1=r[2]; t->y1=r[3]; t->approx=approx; t->whole=whole; }
             else { t->x1=t->x0; t->y1=t->y0; t->approx=0; } /* never hit; tried again after BOUNDS_NS */
         }
         host_unlock(&menu_lock);
@@ -1022,43 +1025,55 @@ static int pointable(const MenuItem *m, uint64_t container) {
     return m->container==container && m->cursor && m->bounds_ns && !m->absent;
 }
 /* The spacing of a container's measured items: the smallest gap between top left corners along a
- * row (x) and along a column (y); 0 where they do not spread. */
-static void pitches(uint64_t container, int approx, float *pitch_x, float *pitch_y) {
-    *pitch_x=*pitch_y=0;
+ * row (x) and along a column (y), 0 where they do not spread; and the glow, how far the smallest
+ * cursor reaches past a pitch on each side. */
+typedef struct { float pitch[2], glow[2]; } Spacing;
+static Spacing spacing(uint64_t container, int approx) {
+    Spacing g={{0,0},{0,0}};
+    float least[2]={0,0};
     for (int i=0;i<menu_item_count;++i) {
         const MenuItem *m=&menu_items[i];
         if (!pointable(m,container) || m->approx!=approx || (!approx && m->x1<=m->x0)) continue;
+        const float size[2]={m->x1-m->x0,m->y1-m->y0};
+        for (int k=0;k<2;++k) if (!m->whole && (!least[k] || size[k]<least[k])) least[k]=size[k];
         for (int j=i+1;j<menu_item_count;++j) {
             const MenuItem *n=&menu_items[j];
             if (!pointable(n,container) || n->approx!=approx || (!approx && n->x1<=n->x0)) continue;
             const float dx=m->x0>n->x0 ? m->x0-n->x0 : n->x0-m->x0, dy=m->y0>n->y0 ? m->y0-n->y0 : n->y0-m->y0;
-            if (dx>2 && dy<=8 && (!*pitch_x || dx<*pitch_x)) *pitch_x=dx;
-            if (dy>2 && dx<=8 && (!*pitch_y || dy<*pitch_y)) *pitch_y=dy;
+            if (dx>2 && dy<=8 && (!g.pitch[0] || dx<g.pitch[0])) g.pitch[0]=dx;
+            if (dy>2 && dx<=8 && (!g.pitch[1] || dy<g.pitch[1])) g.pitch[1]=dy;
         }
     }
+    for (int k=0;k<2;++k) if (g.pitch[k] && least[k]>g.pitch[k]) g.glow[k]=(least[k]-g.pitch[k])/2;
+    return g;
 }
-/* An item's area to point at: its bounds, but no further than one pitch from its top left corner
- * (bounds can swell with hidden text or the selected item's description panel). */
-static void hit_rect(const MenuItem *m, float pitch_x, float pitch_y, float r[4]) {
-    r[0]=m->x0; r[1]=m->y0;
-    r[2]=pitch_x && m->x1>m->x0+pitch_x ? m->x0+pitch_x : m->x1;
-    r[3]=pitch_y && m->y1>m->y0+pitch_y ? m->y0+pitch_y : m->y1;
+/* An item's area to point at: its bounds, but no more than one pitch across. Cursors' bounds hold
+ * their glow (a 108 px band over rows 56 px apart, 710 px over buttons 162 px apart), as much on
+ * each side of what they highlight: the pitch starts that far in. A bigger cursor (a description
+ * panel) or an item's own bounds (hidden text) swell down and right. */
+static void hit_rect(const MenuItem *m, const Spacing *g, float r[4]) {
+    const float lo[2]={m->x0,m->y0}, hi[2]={m->x1,m->y1};
+    for (int k=0;k<2;++k) {
+        r[k]=lo[k]; r[k+2]=hi[k];
+        if (!g->pitch[k] || hi[k]-lo[k]<=g->pitch[k]) continue;
+        if (!m->whole) r[k]+=g->glow[k];
+        r[k+2]=r[k]+g->pitch[k];
+    }
 }
 static int hit(uint64_t container, float sx, float sy) {
     int found=-1, approx=0;
     float best=0, pitch_x=0, pitch_y=0;
-    pitches(container,0,&pitch_x,&pitch_y);
+    const Spacing g=spacing(container,0);
     for (int i=0;i<menu_item_count;++i) {
         const MenuItem *m=&menu_items[i];
         if (!pointable(m,container)) continue;
         if (m->approx) { approx=1; continue; }
         float r[4];
-        hit_rect(m,pitch_x,pitch_y,r);
+        hit_rect(m,&g,r);
         const float area=(r[2]-r[0])*(r[3]-r[1]);
         if (r[2]>r[0] && sx>=r[0] && sx<r[2] && sy>=r[1] && sy<r[3] && (found<0 || area<best)) { found=i; best=area; }
     }
     if (found>=0 || !approx) return found;
-    pitch_x=pitch_y=0;
     for (int i=0;i<menu_item_count;++i) {
         const MenuItem *m=&menu_items[i];
         if (!pointable(m,container) || !m->approx) continue;
@@ -1084,6 +1099,40 @@ static int hit(uint64_t container, float sx, float sy) {
         if (found<0 || ex*ex+ey*ey<best) { found=i; best=ex*ex+ey*ey; }
     }
     return found;
+}
+/* A list showing one clip: an options row's value (on/off, a region), a list of its own beside
+ * the row's name, with its own highlight and arrows. */
+static int one_clip(const MenuContainer *c) {
+    return c && c->list && c->list_rows<=1 && c->list_columns<=1;
+}
+/* The row of a one-column list whose value the pointer is on: in the band of the row at the
+ * pointer's height, within the clip of a value the game updates beside the rows (the selected
+ * row's at least; the others may stand still). -1 elsewhere. */
+static int value_row(const MenuContainer *rows, float sx, float sy, uint64_t now) {
+    if (!rows->list || one_clip(rows) || rows->list_columns>1) return -1;
+    float top=0, bottom=0, height=0;
+    int row=-1, bands=0;
+    const Spacing g=spacing(rows->container,0);
+    for (int i=0;i<menu_item_count;++i) {
+        const MenuItem *m=&menu_items[i];
+        if (!pointable(m,rows->container) || m->approx) continue;
+        float r[4];
+        hit_rect(m,&g,r);
+        if (!bands++ || r[1]<top) top=r[1];
+        if (bands==1 || r[3]>bottom) bottom=r[3];
+        if (sy>=r[1] && sy<r[3] && (row<0 || r[3]-r[1]<height)) { row=i; height=r[3]-r[1]; }
+    }
+    if (row<0) return -1;
+    for (int c=0;c<MAX_CONTAINERS;++c) {
+        const MenuContainer *v=&containers[c];
+        if (v==rows || !one_clip(v) || now-v->list_ns>=LIST_LIVE_NS) continue;
+        for (int i=0;i<menu_item_count;++i) {
+            const MenuItem *m=&menu_items[i];
+            if (!pointable(m,v->container) || m->approx || (m->y0+m->y1)/2<top || (m->y0+m->y1)/2>=bottom) continue;
+            if (sx>=m->x0 && sx<m->x1) return row;
+        }
+    }
+    return -1;
 }
 /* The direction from one item to another by their names: Item_<row>_<column> in every menu seen
  * (title, in-game menu, lists, options), rows down, columns right. Their bounds would mislead:
@@ -1326,6 +1375,12 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
         /* Lists sharing the screen: the pointer works in each one the game updates. */
         for (int i=0;i<MAX_CONTAINERS && hovered<0 && input_list(menu,now,by_focus);++i)
             if (&containers[i]!=menu && input_list(&containers[i],now,by_focus)) hovered=hit(containers[i].container,sx,sy);
+        /* An options row's value stands for its row (beside the row's name, highlighted with it). */
+        if (hovered<0 || one_clip(container_of(menu_items[hovered].container,0)))
+            for (int i=0;i<MAX_CONTAINERS;++i) {
+                const int row=&containers[i]==menu || input_list(&containers[i],now,by_focus) ? value_row(&containers[i],sx,sy,now) : -1;
+                if (row>=0) { hovered=row; break; }
+            }
     }
     int moved=pointer_x!=last_pointer_x || pointer_y!=last_pointer_y;
     last_pointer_x=pointer_x; last_pointer_y=pointer_y;
@@ -1334,10 +1389,10 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
         /* The pointer starts on the selected item, where the highlight is. */
         float wx=-1, wy=-1;
         if (shown && selected>=0 && menu_items[selected].bounds_ns && window_w>0 && window_h>0) {
-            float pitch_x, pitch_y, r[4];
-            pitches(menu->container,menu_items[selected].approx,&pitch_x,&pitch_y);
-            hit_rect(&menu_items[selected],pitch_x,pitch_y,r);
-            if (menu_items[selected].approx) { r[2]=r[0]+pitch_x; r[3]=r[1]+pitch_y; }
+            float r[4];
+            const Spacing g=spacing(menu->container,menu_items[selected].approx);
+            hit_rect(&menu_items[selected],&g,r);
+            if (menu_items[selected].approx) { r[2]=r[0]+g.pitch[0]; r[3]=r[1]+g.pitch[1]; }
             wx=(r[0]+r[2])/2*window_w/STAGE_W; wy=(r[1]+r[3])/2*window_h/STAGE_H;
             last_pointer_x=wx; last_pointer_y=wy;
         }
