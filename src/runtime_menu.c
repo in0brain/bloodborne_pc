@@ -310,14 +310,17 @@ static void dump_followed(FILE *f, const Followed *d) {
  * Every operation the menus' C++ code does on a movie (member lookups, ActionScript calls,
  * frames, text, display info) goes through this interface's vtable, with names as strings.
  * Each slot gets a thunk: "push slot; jmp common". The common code saves the argument registers
- * (xmm0-7 too), asks trace_call for the original (logging the call while a trace runs), restores
- * them and jumps there. */
+ * (xmm0-7 too) and its frame pointer, asks trace_call for the original (logging the call while a
+ * trace runs, with the game's functions that led to it: the guest code keeps frame pointers),
+ * restores them and jumps there. */
 #define OBJECT_INTERFACE 0x51B9570u /* the AS3 ValueObjectInterface vtable */
 #define INTERFACE_SLOTS 49
 #define TRACE_NS UINT64_C(4000000000)
 #define TRACE_BYTES (48u << 20)
 #define STACK_WINDOW 0x100000       /* strings this far above a call's saved registers: its caller's stack */
-#define COMMON_IMM 118              /* the trace_call address in the common code */
+#define COMMON_IMM 123              /* the trace_call address in the common code */
+#define REG_FRAME 7                 /* regs[7]: the common code's rbp: [+0] the caller's rbp, [+16] the return */
+#define CALLERS 6                   /* return addresses a trace line shows */
 #define THUNKS 256                  /* offset of the slot thunks, 8 bytes each */
 #define DISPLAY_VISIBLE 48          /* GFx::Value::DisplayInfo: six doubles, then bool Visible */
 
@@ -333,7 +336,7 @@ static const char *const slot_names[INTERFACE_SLOTS]={
 static const uint8_t trace_common[]={
     0x55, 0x48,0x89,0xE5, 0x48,0x83,0xE4,0xF0, 0x48,0x81,0xEC,0xC0,0x00,0x00,0x00,
     0x48,0x89,0x3C,0x24, 0x48,0x89,0x74,0x24,0x08, 0x48,0x89,0x54,0x24,0x10, 0x48,0x89,0x4C,0x24,0x18,
-    0x4C,0x89,0x44,0x24,0x20, 0x4C,0x89,0x4C,0x24,0x28, 0x48,0x89,0x44,0x24,0x30,
+    0x4C,0x89,0x44,0x24,0x20, 0x4C,0x89,0x4C,0x24,0x28, 0x48,0x89,0x44,0x24,0x30, 0x48,0x89,0x6C,0x24,0x38,
     0xF3,0x0F,0x7F,0x44,0x24,0x40, 0xF3,0x0F,0x7F,0x4C,0x24,0x50, 0xF3,0x0F,0x7F,0x54,0x24,0x60,
     0xF3,0x0F,0x7F,0x5C,0x24,0x70, 0xF3,0x0F,0x7F,0xA4,0x24,0x80,0x00,0x00,0x00,
     0xF3,0x0F,0x7F,0xAC,0x24,0x90,0x00,0x00,0x00, 0xF3,0x0F,0x7F,0xB4,0x24,0xA0,0x00,0x00,0x00,
@@ -347,9 +350,10 @@ static const uint8_t trace_common[]={
     0x48,0x8B,0x54,0x24,0x10, 0x48,0x8B,0x74,0x24,0x08, 0x48,0x8B,0x3C,0x24,
     0x48,0x89,0xEC, 0x5D, 0x48,0x83,0xC4,0x08, 0x41,0xFF,0xE3,
 };
-_Static_assert(sizeof(trace_common)==236 && sizeof(trace_common)<=THUNKS,"trace common code");
+_Static_assert(sizeof(trace_common)==241 && sizeof(trace_common)<=THUNKS,"trace common code");
 
 static uintptr_t interface_original[INTERFACE_SLOTS];
+static unsigned char *hook_page;     /* executable: the trace's common code and thunks, the list hook's code */
 static int traceable, tracing;
 static unsigned traces;
 static uint64_t trace_start, trace_end;
@@ -510,6 +514,19 @@ static ABI uint64_t trace_call(uint64_t slot, const uint64_t *regs) {
             at+=snprintf(at,(size_t)(end-at)," info(x=%g y=%g rot=%g xs=%g ys=%g alpha=%g visible=%u)",
                          d[0],d[1],d[2],d[3],d[4],d[5],visible);
     }
+    /* The game's functions on the way here (image offsets): the return address, then one per frame
+     * up the frame pointers ([rbp] the caller's rbp, [rbp+8] its return address). */
+    uint64_t fp=regs[REG_FRAME], ret=0;
+    if (at<end && read_host((uintptr_t)(fp+16),(unsigned char *)&ret,8)==8 && in_image((uintptr_t)ret,0,TEXT_END,1)) {
+        at+=snprintf(at,(size_t)(end-at)," <");
+        for (int k=0;k<CALLERS && at<end;++k) {
+            at+=snprintf(at,(size_t)(end-at)," %" PRIx64,ret-(uintptr_t)image);
+            uint64_t up=0;
+            if (read_host((uintptr_t)fp,(unsigned char *)&up,8)!=8 || up<=fp || up-fp>STACK_WINDOW) break;
+            fp=up;
+            if (read_host((uintptr_t)(fp+8),(unsigned char *)&ret,8)!=8 || !in_image((uintptr_t)ret,0,TEXT_END,1)) break;
+        }
+    }
     if (at>end) at=end;
     *at++='\n';
     trace_append(line,(size_t)(at-line));
@@ -544,6 +561,7 @@ static void trace_configure(void) {
         interface_original[i]=table[i];
     }
     for (int i=0;i<INTERFACE_SLOTS;++i) __atomic_store_n(&table[i],(uintptr_t)(code+THUNKS+i*8),__ATOMIC_RELEASE);
+    hook_page=code;
     traceable=1;
 }
 static void trace_begin(float pointer_x, float pointer_y, int window_w, int window_h) {
@@ -614,7 +632,17 @@ static void trace_finish(void) {
  * top left corner, each waiting for the selection to move (a selection unknown yet is revealed
  * by one press; one that comes back to an item already passed gives up: a list too short, an
  * empty row); the left button confirms, the right one cancels. Menu movies are 1920x1080
- * stages over the window. */
+ * stages over the window.
+ *
+ * Most menus are the game's list widget: a grid of those clips showing a scrolled run of entries,
+ * the selection kept in the widget. A hook at the start of its per-frame update (every list type
+ * runs it, on the game's thread) learns each live list: its container (through the clip namer it
+ * holds), its selection and its layout. Pointing at an item of a list then selects it in one jump:
+ * the hook calls the widget's SetSelection, then tells its listener (the dialog: description,
+ * help text) and requests the cursor sound, as the update does after a key press. A list the game
+ * stops updating has lost the focus (a screen over it, like the equipment slots over the in-game
+ * menu): the mouse stays free, but its items take nothing. Menus without a list widget take d-pad
+ * steps as above. */
 #define MAX_ITEMS 256
 #define MAX_CONTAINERS 16
 #define STAGE_W 1920.0f
@@ -639,6 +667,46 @@ static void trace_finish(void) {
 #define PAD_LEFT 0x80u
 #define PAD_CIRCLE 0x2000u
 #define PAD_CROSS 0x4000u
+/* The list widget (v1.09). */
+#define LIST_UPDATE 0x1ACFF30u        /* update(list, input): every frame the list has the focus */
+#define LIST_SET_SELECTION 0x1ACF6B0u /* int SetSelection(list, entry): scrolls to it, moves the cursor; 1 done */
+#define LIST_PROLOGUE 20              /* push rbp ... sub rsp,0x98: the bytes the hook's jump replaces */
+#define LIST_LISTENER 0x30            /* object told of a new selection: vtable slot 2 (self, int *entry) */
+#define LIST_COUNT 0x70               /* int: entries */
+#define LIST_SELECTED 0x74            /* int: the selected entry */
+#define LIST_OVERRIDE 0x78            /* int: when >= 0, the selection instead of LIST_SELECTED */
+#define LIST_COLUMNS 0x7C             /* clips per row */
+#define LIST_ROWS 0x80                /* rows of clips; 1: one row holding every entry */
+#define LIST_FIRST_COLUMN 0x84        /* scrolling: the entry offset of the first clip */
+#define LIST_FIRST_ROW 0x24C          /* scrolling: the entry row in the top row of clips */
+#define LIST_NAMER 0x258              /* names the clips Item_<row>_<column>: a GFx::Value of the container at +40 */
+#define LIST_WRAPS 0x2B0              /* byte: the entries wrap around */
+#define NAMER_OI 0x50
+#define NAMER_TYPE 0x58
+#define NAMER_CONTAINER 0x60
+#define MENU_SOUND 0x557FC60u         /* the menu sound to play: {int, int priority, const char *name} */
+#define CURSOR_SOUND 0x49344E4u       /* "カーソル移動" (cursor move), UTF-8 */
+#define LIST_LIVE_NS UINT64_C(250000000) /* a list updated this lately has the focus */
+#define CONFIRM_NS UINT64_C(40000000)    /* a jump's selection settles this long before the confirm press */
+#define MAX_LIST_NOTES 64
+static const uint8_t list_update_code[26]={0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,
+                                           0x48,0x81,0xEC,0x98,0x00,0x00,0x00,0x49,0x89,0xF7,0x49,0x89,0xFD};
+static const uint8_t list_set_selection_code[26]={0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,
+                                                  0x48,0x81,0xEC,0xE8,0x00,0x00,0x00,0x41,0x89,0xF6,0x49,0x89,0xFC};
+static const char cursor_sound[]="\xE3\x82\xAB\xE3\x83\xBC\xE3\x82\xBD\xE3\x83\xAB\xE7\xA7\xBB\xE5\x8B\x95";
+/* The hook's code: the arguments kept around list_update(list, input), the replaced prologue, back. */
+static const uint8_t list_trampoline[]={
+    0x57, 0x56, 0x48,0x83,0xEC,0x08,                   /*  0 push rdi; push rsi; sub rsp,8 */
+    0x48,0xB8,0,0,0,0,0,0,0,0, 0xFF,0xD0,              /*  6 mov rax,list_update; call rax */
+    0x48,0x83,0xC4,0x08, 0x5E, 0x5F,                   /* 18 add rsp,8; pop rsi; pop rdi */
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,            /* 24 the prologue */
+    0xFF,0x25,0x00,0x00,0x00,0x00,                     /* 44 jmp [rip+0]; after the prologue */
+};
+#define TRAMPOLINE_HOOK 8
+#define TRAMPOLINE_PROLOGUE 24
+#define TRAMPOLINE_BACK 50
+#define TRAMPOLINE_AT 1024            /* in the trace's code page */
+_Static_assert(sizeof(list_trampoline)==TRAMPOLINE_BACK && TRAMPOLINE_PROLOGUE+LIST_PROLOGUE==44,"list hook code");
 
 /* GFx::Value (0x30 bytes): a managed value (type bit 0x40) is linked into its movie's list
  * (next, prev) until released, so every one returned to us is released before it goes. */
@@ -665,10 +733,15 @@ typedef struct {
                                 * COVERED: presses here went unanswered (a screen over it the mouse does not
                                 * know, like the equipment slots), until its selection moves again */
     uint64_t covered_ns;
+    uint64_t list, list_ns;    /* the list widget showing its items, and its last update */
     int selected, unanswered;
 } MenuContainer;
 #define COVERED UINT64_MAX
 #define UNANSWERED_MAX 2
+/* A list's state, read on its update. */
+typedef struct { int count, selected, columns, rows, first_column, first_row, wraps; } ListState;
+/* Pad thread -> list hook: select the entry under Item_<jump_a>_<jump_b> of jump_list. */
+enum { JUMP_IDLE, JUMP_POSTED, JUMP_TAKEN, JUMP_DONE };
 
 static int menu_mouse;
 static HostMutex menu_lock=HOST_MUTEX_INIT;
@@ -678,13 +751,18 @@ static MenuContainer containers[MAX_CONTAINERS];
 static __thread int pending_item=-1, pending_cursor=-1, measuring;
 static int bounds_broken;            /* a measurement failed badly: no more */
 /* Pad thread: the navigation. */
-static int menu_shown, blocked=-1, nav_target=-1, confirm_target=-1, press_from=-1, steps;
+static int menu_shown, blocked=-1, nav_target=-1, confirm_target=-1, press_from=-1, steps, last_hovered=-1;
 static int visited[MAX_VISITED], visited_count;
 static float last_pointer_x=-1, last_pointer_y=-1;
 static uint32_t press_button, previous_free;
 static uint64_t press_container, press_ns; /* where the last d-pad press was aimed, and when */
 static uint64_t press_until, gap_until, settle_until;
 static uint32_t confirm_button=PAD_CROSS, cancel_button=PAD_CIRCLE;
+/* The list hook and the jumps (under menu_lock). */
+static int jump_state=JUMP_IDLE, jump_a, jump_b, jump_target=-1, jump_moved;
+static uint64_t jump_list, jump_ns;
+static uint64_t noted_lists[MAX_LIST_NOTES];
+static int listable;                 /* the list hook is in */
 
 static void menu_note(const char *format, ...) __attribute__((format(printf,1,2)));
 static void menu_note(const char *format, ...) {
@@ -711,7 +789,7 @@ static MenuContainer *container_of(uint64_t container, int add) {
         if (containers[i].touch_ns<oldest->touch_ns) oldest=&containers[i];
     }
     if (!add) return NULL;
-    *oldest=(MenuContainer){container,host_monotonic_ns(),0,0,0,0,0,-1,0};
+    *oldest=(MenuContainer){.container=container,.touch_ns=host_monotonic_ns(),.selected=-1};
     return oldest;
 }
 static int item_index(uint64_t container, int a, int b) {
@@ -723,6 +801,14 @@ static int item_index(uint64_t container, int a, int b) {
     if (menu_item_count<MAX_ITEMS) return menu_item_count++;
     for (int c=0;c<MAX_CONTAINERS;++c) if (containers[c].selected==oldest) containers[c].selected=-1;
     return oldest;
+}
+/* The item Item_<a>_<b> of a container, known from now on (seen now). */
+static int item_add(uint64_t oi, uint64_t container, int a, int b, uint64_t now) {
+    const int i=item_index(container,a,b);
+    MenuItem *m=&menu_items[i];
+    if (m->container!=container || m->a!=a || m->b!=b) *m=(MenuItem){oi,container,0,0,a,b,0,0,0,0,0,now,0};
+    m->seen_ns=now;
+    return i;
 }
 static int item_by(uint64_t clip, int cursor) {
     for (int i=0;i<menu_item_count;++i)
@@ -829,6 +915,7 @@ static int probe_items(uint64_t oi, uint64_t container, Found *found, int max) {
     return count;
 }
 static int cursor_items(uint64_t container);
+static void scan_container(uint64_t oi, uint64_t container, int probe_now, int measure_now, int first, uint64_t now);
 /* Every interface call (the hook, before the original runs). */
 static void menu_observe(uint64_t slot, const uint64_t *regs) {
     if (!menu_mouse || measuring || slot==2 || slot==3) return;
@@ -849,11 +936,7 @@ static void menu_observe(uint64_t slot, const uint64_t *regs) {
     if (slot==5 && read_name((uintptr_t)regs[2],stack,name,sizeof(name))) {
         int a, b, end=0;
         if (!strncmp(name,"Item_",5) && sscanf(name,"Item_%d_%d%n",&a,&b,&end)==2 && !name[end]) {
-            const int i=item_index(obj,a,b);
-            MenuItem *m=&menu_items[i];
-            if (m->container!=obj || m->a!=a || m->b!=b) *m=(MenuItem){regs[0],obj,0,0,a,b,0,0,0,0,0,now,0};
-            m->seen_ns=now;
-            pending_item=i;
+            pending_item=item_add(regs[0],obj,a,b,now);
             if (__atomic_load_n(&menu_shown,__ATOMIC_RELAXED)) {
                 MenuContainer *c=container_of(obj,1);
                 if (!c->probe_ns || now-c->probe_ns>PROBE_NS) { c->probe_ns=now; probe_now=1; }
@@ -867,8 +950,8 @@ static void menu_observe(uint64_t slot, const uint64_t *regs) {
     }
     if (slot==29) { /* SetDisplayInfo on a cursor: the last one of a refresh is the selection */
         const int i=item_by(obj,1);
-        if (i>=0) {
-            MenuContainer *c=container_of(menu_items[i].container,1);
+        MenuContainer *c=i>=0 ? container_of(menu_items[i].container,1) : NULL;
+        if (c && !(c->list && now-c->list_ns<LIST_LIVE_NS)) { /* a live list tells its selection itself */
             if (c->selected!=i) menu_note("selected Item_%d_%d (container %" PRIx64 ")",menu_items[i].a,menu_items[i].b,c->container);
             c->selected=i; c->select_ns=c->touch_ns=c->active_ns=now; c->unanswered=0;
         }
@@ -876,33 +959,37 @@ static void menu_observe(uint64_t slot, const uint64_t *regs) {
     MenuContainer *c=container_of(obj,0);
     if (c) { c->touch_ns=now; measure_now=!bounds_broken; }
     host_unlock(&menu_lock);
+    scan_container(regs[0],obj,probe_now,measure_now,-1,now);
+}
+/* On the game's thread, during its call on a live container: finds its items (probe_now) and
+ * measures a few whose bounds are old (measure_now), the item `first` first. */
+static void scan_container(uint64_t oi, uint64_t container, int probe_now, int measure_now, int first, uint64_t now) {
     if (probe_now) {
         Found found[PROBE_ROWS*PROBE_COLUMNS];
         measuring=1;
-        const int count=probe_items(regs[0],obj,found,PROBE_ROWS*PROBE_COLUMNS);
+        const int count=probe_items(oi,container,found,PROBE_ROWS*PROBE_COLUMNS);
         measuring=0;
         host_lock(&menu_lock);
-        MenuContainer *found_in=container_of(obj,1);
-        if (count && !cursor_items(obj)) found_in->active_ns=now;
+        MenuContainer *found_in=container_of(container,1);
+        if (count && !cursor_items(container)) found_in->active_ns=now;
         for (int k=0;k<count;++k) {
-            const int i=item_index(obj,found[k].a,found[k].b);
-            MenuItem *m=&menu_items[i];
-            if (m->container!=obj || m->a!=found[k].a || m->b!=found[k].b)
-                *m=(MenuItem){regs[0],obj,0,0,found[k].a,found[k].b,0,0,0,0,0,now,0};
-            m->item=found[k].item; m->cursor=found[k].cursor; m->seen_ns=now;
+            const int i=item_add(oi,container,found[k].a,found[k].b,now);
+            menu_items[i].item=found[k].item; menu_items[i].cursor=found[k].cursor;
         }
         host_unlock(&menu_lock);
-        if (count) menu_note("found %d items with a cursor (container %" PRIx64 ")",count,obj);
+        if (count) menu_note("found %d items with a cursor (container %" PRIx64 ")",count,container);
     }
     if (!measure_now) return;
-    /* On the container's frame call: measure a few of its items whose bounds are old. */
+    /* A few of its items whose bounds are old. */
     for (int n=0;n<MEASURES_PER_CALL;) {
         MenuItem m;
         int index=-1;
         host_lock(&menu_lock);
-        for (int i=0;i<menu_item_count;++i)
-            if (menu_items[i].container==obj && menu_items[i].cursor &&
-                (!menu_items[i].bounds_ns || now-menu_items[i].bounds_ns>BOUNDS_NS)) { index=i; m=menu_items[i]; break; }
+        for (int k=-1;k<menu_item_count && index<0;++k) {
+            const int i=k<0 ? first : k;
+            if (i>=0 && i<menu_item_count && menu_items[i].container==container && menu_items[i].cursor &&
+                (!menu_items[i].bounds_ns || now-menu_items[i].bounds_ns>BOUNDS_NS)) { index=i; m=menu_items[i]; }
+        }
         if (index>=0) menu_items[index].bounds_ns=now; /* tried, even if it fails */
         host_unlock(&menu_lock);
         if (index<0) break;
@@ -910,11 +997,11 @@ static void menu_observe(uint64_t slot, const uint64_t *regs) {
         float r[4]={0,0,0,0};
         int approx=0;
         measuring=1;
-        const int ok=measure(regs[0],obj,m.a,m.b,r,&approx);
+        const int ok=measure(oi,container,m.a,m.b,r,&approx);
         measuring=0;
         host_lock(&menu_lock);
         MenuItem *t=&menu_items[index];
-        if (t->container==obj && t->a==m.a && t->b==m.b) {
+        if (t->container==container && t->a==m.a && t->b==m.b) {
             if (ok) { t->x0=r[0]; t->y0=r[1]; t->x1=r[2]; t->y1=r[3]; t->approx=approx; }
             else { t->x1=t->x0; t->y1=t->y0; t->approx=0; } /* never hit; tried again after BOUNDS_NS */
         }
@@ -1003,6 +1090,169 @@ static int cursor_items(uint64_t container) {
     for (int i=0;i<menu_item_count;++i) n+=menu_items[i].container==container && menu_items[i].cursor;
     return n;
 }
+
+/* ---- The list widget ---- */
+static int32_t guest_i32(uint64_t a) { int32_t v; memcpy(&v,(const void *)(uintptr_t)a,4); return v; }
+static uint64_t guest_u64(uint64_t a) { uint64_t v; memcpy(&v,(const void *)(uintptr_t)a,8); return v; }
+static void list_state(uint64_t list, ListState *s) {
+    s->count=guest_i32(list+LIST_COUNT);
+    const int32_t override=guest_i32(list+LIST_OVERRIDE);
+    s->selected=override>=0 ? override : guest_i32(list+LIST_SELECTED);
+    s->columns=guest_i32(list+LIST_COLUMNS); s->rows=guest_i32(list+LIST_ROWS);
+    s->first_column=guest_i32(list+LIST_FIRST_COLUMN); s->first_row=guest_i32(list+LIST_FIRST_ROW);
+    s->wraps=*(const volatile uint8_t *)(uintptr_t)(list+LIST_WRAPS)!=0;
+}
+/* The widget's arithmetic: entries per row (one row of clips holds them all), and its wrapping. */
+static int64_t list_stride(const ListState *s) {
+    int64_t n=s->columns;
+    if (s->rows==1 && s->count>n) n=s->count;
+    return n>1 ? n : 1;
+}
+static int64_t list_wrap(const ListState *s, int64_t e) {
+    return s->wraps && s->count>0 ? (int64_t)((uint32_t)e%(uint32_t)s->count) : e;
+}
+/* The entry the clip Item_<row>_<column> shows; -1 for none. */
+static int list_entry(const ListState *s, int row, int column) {
+    const int rows=s->rows>1 ? s->rows : 1, columns=s->columns>1 ? s->columns : 1;
+    if (row<0 || row>=rows || column<0 || column>=columns) return -1;
+    const int64_t e=list_wrap(s,((int64_t)s->first_row+row)*list_stride(s)+s->first_column+column);
+    return e>=0 && e<s->count ? (int)e : -1;
+}
+/* The clip that shows an entry; 0 when it is scrolled off. */
+static int list_clip(const ListState *s, int entry, int *row, int *column) {
+    const int rows=s->rows>1 ? s->rows : 1, columns=s->columns>1 ? s->columns : 1;
+    if (entry<0 || entry>=s->count) return 0;
+    int64_t k=entry-list_wrap(s,(int64_t)s->first_row*list_stride(s)+s->first_column);
+    if (s->wraps && k<0) k+=s->count;
+    if (k<0 || k>=(int64_t)rows*columns) return 0;
+    *row=(int)(k/columns); *column=(int)(k%columns);
+    return 1;
+}
+typedef ABI int32_t (*SetSelectionFn)(uint64_t list, int32_t entry);
+typedef ABI void (*ListenerFn)(uint64_t self, int32_t *entry);
+/* Selects an entry as the update does after a key press: the widget's SetSelection (scrolling,
+ * the cursor), then its listener and the cursor sound. On the game's thread, in the list's update,
+ * without menu_lock (the widget calls the hooked interface). 1 when the selection moved. */
+static int list_select(uint64_t list, int entry) {
+    ListState before, after;
+    list_state(list,&before);
+    ((SetSelectionFn)(uintptr_t)(image+LIST_SET_SELECTION))(list,entry);
+    list_state(list,&after);
+    if (after.selected==before.selected) return 0;
+    const uint64_t listener=guest_u64(list+LIST_LISTENER);
+    if (listener) {
+        int32_t selected=after.selected;
+        ((ListenerFn)(uintptr_t)guest_u64(guest_u64(listener)+16))(listener,&selected);
+    }
+    unsigned char *sound=image+MENU_SOUND;
+    if (guest_i32((uintptr_t)sound+4)<=0) { /* nothing more important asked for */
+        const uint64_t none=0, name=(uintptr_t)image+CURSOR_SOUND;
+        memcpy(sound,&none,8);
+        memcpy(sound+8,&name,8);
+    }
+    return 1;
+}
+/* A list's container (the Scaleform object its clip namer holds) and its state; 0 for a list
+ * without one. Guarded: a list type with another namer would not fault the game. */
+static int list_read(uint64_t list, uint64_t *oi, uint64_t *container, ListState *s) {
+    RuntimeRecoverBuf recover;
+    RuntimeRecoverBuf *previous=runtime_fault_recover;
+    if (RUNTIME_RECOVER_SET(recover)) { runtime_fault_recover=previous; return 0; }
+    runtime_fault_recover=&recover;
+    int ok=0;
+    const uint64_t namer=guest_u64(list+LIST_NAMER);
+    if (namer && (guest_i32(namer+NAMER_TYPE)&0x0F)==10) {
+        *oi=guest_u64(namer+NAMER_OI); *container=guest_u64(namer+NAMER_CONTAINER);
+        ok=*oi && *container && guest_u64(*oi)==(uintptr_t)image+OBJECT_INTERFACE;
+        if (ok) list_state(list,s);
+    }
+    runtime_fault_recover=previous;
+    return ok;
+}
+/* The hook at the start of every list update (the game's thread): the list's container and
+ * selection; a jump the pad thread asked for; its container's items found and measured. */
+static ABI void list_update(uint64_t list, uint64_t input) {
+    (void)input;
+    if (!menu_mouse) return;
+    const uint64_t now=host_monotonic_ns();
+    uint64_t oi, container;
+    ListState s;
+    if (!list_read(list,&oi,&container,&s)) return;
+    int row, column, a=0, b=0, entry=-1, first=1;
+    host_lock(&menu_lock);
+    MenuContainer *c=container_of(container,1);
+    const int fresh=c->list!=list || now-c->list_ns>=LIST_LIVE_NS;
+    if (fresh) c->active_ns=now; /* (back) in front: a submenu over the menu that is still drawn */
+    c->list=list; c->list_ns=c->touch_ns=now; c->behind=0; c->unanswered=0;
+    const int selected=list_clip(&s,s.selected,&row,&column) ? item_add(oi,container,row,column,now) : -1;
+    if (selected!=c->selected) { c->selected=selected; c->select_ns=c->active_ns=now; }
+    const int take=jump_state==JUMP_POSTED && jump_list==list;
+    if (take) { a=jump_a; b=jump_b; entry=list_entry(&s,a,b); jump_state=JUMP_TAKEN; }
+    const int probe_now=!c->probe_ns || now-c->probe_ns>PROBE_NS;
+    if (probe_now) c->probe_ns=now;
+    if (fresh) {
+        for (int i=0;i<MAX_LIST_NOTES;++i) {
+            if (noted_lists[i]==list) { first=0; break; }
+            if (!noted_lists[i]) { noted_lists[i]=list; break; }
+        }
+    }
+    host_unlock(&menu_lock);
+    if (fresh) {
+        menu_note("list %" PRIx64 " in front: container %" PRIx64 ", %d entries, %d columns x %d rows, selected %d",
+                  list,container,s.count,s.columns,s.rows,s.selected);
+        if (first) printf("Menu mouse: list %" PRIx64 " (%d entries, %d columns x %d rows)\n",list,s.count,s.columns,s.rows);
+    }
+    if (take) {
+        const int moved=entry>=0 && list_select(list,entry);
+        list_state(list,&s);
+        host_lock(&menu_lock);
+        c=container_of(container,1);
+        const int now_selected=list_clip(&s,s.selected,&row,&column) ? item_add(oi,container,row,column,now) : -1;
+        if (now_selected!=c->selected) { c->selected=now_selected; c->select_ns=c->active_ns=now; }
+        jump_moved=moved; jump_state=JUMP_DONE;
+        host_unlock(&menu_lock);
+        menu_note("jump to Item_%d_%d: entry %d of %d, %s",a,b,entry,s.count,moved ? "selected" : "not selectable");
+    }
+    scan_container(oi,container,probe_now,!bounds_broken,selected,now);
+}
+/* Rewrites guest code (the image's code pages are read+execute). */
+static int patch_code(uint32_t offset, const void *bytes, size_t size) {
+    unsigned char *p=image+offset;
+    uintptr_t page=(uintptr_t)p&~(uintptr_t)4095, end=((uintptr_t)p+size+4095)&~(uintptr_t)4095;
+#ifdef _WIN32
+    DWORD old;
+    if (!VirtualProtect((void *)page,end-page,PAGE_EXECUTE_READWRITE,&old)) return -1;
+    memcpy(p,bytes,size);
+    VirtualProtect((void *)page,end-page,old,&old);
+    FlushInstructionCache(GetCurrentProcess(),p,size);
+#else
+    if (mprotect((void *)page,end-page,PROT_READ|PROT_WRITE|PROT_EXEC)) return -1;
+    memcpy(p,bytes,size);
+    mprotect((void *)page,end-page,PROT_READ|PROT_EXEC);
+#endif
+    return 0;
+}
+/* Hooks the list update: its prologue becomes a jump to the hook's code (in the trace's page). */
+static void list_configure(unsigned char *code) {
+    if (memcmp(image+LIST_UPDATE,list_update_code,sizeof(list_update_code)) ||
+        memcmp(image+LIST_SET_SELECTION,list_set_selection_code,sizeof(list_set_selection_code)) ||
+        memcmp(image+CURSOR_SOUND,cursor_sound,sizeof(cursor_sound))) {
+        puts("Menu mouse: not the v1.09 list widget (menus take d-pad steps)");
+        return;
+    }
+    unsigned char *t=code+TRAMPOLINE_AT;
+    const uint64_t hook=(uint64_t)(uintptr_t)list_update, back=(uint64_t)(uintptr_t)(image+LIST_UPDATE+LIST_PROLOGUE);
+    memcpy(t,list_trampoline,sizeof(list_trampoline));
+    memcpy(t+TRAMPOLINE_HOOK,&hook,8);
+    memcpy(t+TRAMPOLINE_PROLOGUE,image+LIST_UPDATE,LIST_PROLOGUE);
+    memcpy(t+TRAMPOLINE_BACK,&back,8);
+    uint8_t jump[LIST_PROLOGUE]={0xFF,0x25,0x00,0x00,0x00,0x00};   /* jmp [rip+0]; the hook's code */
+    const uint64_t target=(uint64_t)(uintptr_t)t;
+    memcpy(jump+6,&target,8);
+    memset(jump+14,0x90,LIST_PROLOGUE-14);
+    if (patch_code(LIST_UPDATE,jump,sizeof(jump))) { puts("Menu mouse: cannot hook the list widget (menus take d-pad steps)"); return; }
+    listable=1;
+}
 /* Pad thread: whether a menu is on screen (the window frees the mouse), and the buttons the
  * pointer adds. Moving onto an item makes it the target, reached with d-pad presses toward it;
  * keys and the wheel stay free otherwise (a resting pointer does not pull the selection back).
@@ -1021,9 +1271,12 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
             const MenuContainer *front=container_of(c->behind,0);
             if (!front || now-front->touch_ns>=MENU_IDLE_NS) c->behind=0;
         }
-        if (!c->container || now-c->touch_ns>=MENU_IDLE_NS || (c->selected<0 && cursor_items(c->container)<2)) continue;
+        /* A menu: items with cursors (a list's, or a selection seen); the HUD's lists have none. */
+        const int items=cursor_items(c->container);
+        if (!c->container || now-c->touch_ns>=MENU_IDLE_NS || (c->list ? items<1 : (c->selected<0 && items<2))) continue;
         ++menus;
-        if (!c->behind && (!menu || c->active_ns>menu->active_ns)) menu=c;
+        const int lost=c->list && now-c->list_ns>=LIST_LIVE_NS; /* its list is no longer updated: covered */
+        if (!c->behind && !lost && (!menu || c->active_ns>menu->active_ns)) menu=c;
     }
     /* A press aimed at one container that another one answered: that one has the focus. */
     if (press_container && menu && menu->container!=press_container && menu->select_ns>press_ns) {
@@ -1053,14 +1306,19 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
             last_pointer_x=wx; last_pointer_y=wy;
         }
         bbgpu_menu_active(shown,wx,wy);
-        press_until=settle_until=0; blocked=nav_target=confirm_target=-1; steps=0;
+        press_until=settle_until=0; blocked=nav_target=confirm_target=last_hovered=-1; steps=0;
+        if (jump_state!=JUMP_TAKEN) jump_state=JUMP_IDLE;
         moved=0; /* where the pointer rests when a menu opens is not a choice */
         if (menu) menu_note("on screen (container %" PRIx64 ")%s",menu->container,wx>=0 ? ", pointer on the selection" : "");
     }
     const uint32_t pressed=free_buttons&~previous_free;
     previous_free=free_buttons;
     if (!shown || !menu) { host_unlock(&menu_lock); return 0; }
-    if (moved && hovered>=0 && hovered!=nav_target && hovered!=blocked) { nav_target=hovered; steps=visited_count=0; }
+    /* A list jumps once per item the pointer moves onto (a jump may scroll other entries under it). */
+    const int direct=menu->list && now-menu->list_ns<LIST_LIVE_NS;
+    if (direct) { if (moved && hovered>=0 && hovered!=last_hovered && hovered!=blocked) nav_target=hovered; }
+    else if (moved && hovered>=0 && hovered!=nav_target && hovered!=blocked) { nav_target=hovered; steps=visited_count=0; }
+    last_hovered=hovered;
     if (hovered!=blocked) blocked=-1;
     if ((pressed&1) && hovered>=0) { nav_target=confirm_target=hovered; steps=visited_count=0; }
     if (nav_target>=0 && menu_items[nav_target].container!=menu->container) nav_target=confirm_target=-1;
@@ -1071,6 +1329,28 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
         press_until=0;
     }
     if (now<gap_until || now-menu->select_ns<REFRESH_NS) goto done;
+    if (direct) {
+        if (jump_state==JUMP_DONE) {
+            jump_state=JUMP_IDLE;
+            if (!jump_moved && jump_target>=0 && jump_target!=selected) { /* an entry it cannot select */
+                blocked=jump_target;
+                if (nav_target==jump_target) nav_target=-1;
+                if (confirm_target==jump_target) confirm_target=-1;
+            }
+        } else if (jump_state==JUMP_POSTED && now-jump_ns>LIST_LIVE_NS) jump_state=JUMP_IDLE; /* its list went */
+        if (nav_target>=0 && nav_target==selected) nav_target=-1;
+        if (pressed&4) {
+            press_button=cancel_button; press_until=now+PRESS_NS; nav_target=confirm_target=-1; menu_note("cancel");
+        } else if (nav_target>=0 && jump_state==JUMP_IDLE) {
+            jump_list=menu->list; jump_a=menu_items[nav_target].a; jump_b=menu_items[nav_target].b;
+            jump_target=nav_target; jump_ns=now; jump_state=JUMP_POSTED;
+            nav_target=-1;
+        } else if (confirm_target>=0 && confirm_target==selected && jump_state==JUMP_IDLE && now-menu->select_ns>=CONFIRM_NS) {
+            press_button=confirm_button; press_until=now+PRESS_NS; confirm_target=-1; menu_note("confirm");
+        }
+        if (press_until) out=press_button;
+        goto done;
+    }
     if (settle_until) {
         if (selected!=press_from) {
             settle_until=0;
@@ -1141,7 +1421,9 @@ void runtime_menu_configure(unsigned char *base, uint64_t size) {
     const char *enter=getenv("BB_ENTER_BUTTON");
     if (enter && !strcmp(enter,"circle")) { confirm_button=PAD_CIRCLE; cancel_button=PAD_CROSS; }
     menu_mouse=traceable;
-    if (menu_mouse) printf("%sMenu mouse: on (menus free the mouse; point, left button confirms, right cancels)%s\n",on,off);
+    if (menu_mouse) list_configure(hook_page);
+    if (menu_mouse) printf("%sMenu mouse: on (menus free the mouse; point, left button confirms, right cancels%s)%s\n",on,
+                           listable ? "; lists jump to the pointed item" : "",off);
     printf("Menu probe: F7 writes %s/menu-probe-*.txt%s\n",log_dir(),
            traceable ? ", F8 menu-trace-*.txt (4 s of menu calls)" : "");
 }
