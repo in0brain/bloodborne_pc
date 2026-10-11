@@ -736,6 +736,7 @@ typedef struct {
     uint64_t covered_ns;
     uint64_t list, list_ns;    /* the list widget showing its items, and its last update */
     int list_rows, list_columns; /* its clips (one row of several: a bar, like an inventory's tabs) */
+    int focused;               /* its last update had the input on */
     int selected, unanswered;
 } MenuContainer;
 #define COVERED UINT64_MAX
@@ -1158,9 +1159,11 @@ static int list_select(uint64_t list, int entry) {
     }
     return 1;
 }
-/* A list's container (the Scaleform object its clip namer holds) and its state; 0 for a list
- * without one. Guarded: a list type with another namer would not fault the game. */
-static int list_read(uint64_t list, uint64_t *oi, uint64_t *container, ListState *s) {
+/* A list's container (the Scaleform object its clip namer holds), its state, and whether the
+ * input it is updated with is on (its first byte: a parent menu behind a submenu is updated with
+ * the input off); 0 for a list without a container. Guarded: a list type with another namer
+ * would not fault the game. */
+static int list_read(uint64_t list, uint64_t input, uint64_t *oi, uint64_t *container, ListState *s, int *focused) {
     RuntimeRecoverBuf recover;
     RuntimeRecoverBuf *previous=runtime_fault_recover;
     if (RUNTIME_RECOVER_SET(recover)) { runtime_fault_recover=previous; return 0; }
@@ -1170,7 +1173,7 @@ static int list_read(uint64_t list, uint64_t *oi, uint64_t *container, ListState
     if (namer && (guest_i32(namer+NAMER_TYPE)&0x0F)==10) {
         *oi=guest_u64(namer+NAMER_OI); *container=guest_u64(namer+NAMER_CONTAINER);
         ok=*oi && *container && guest_u64(*oi)==(uintptr_t)image+OBJECT_INTERFACE;
-        if (ok) list_state(list,s);
+        if (ok) { list_state(list,s); *focused=!input || *(const volatile uint8_t *)(uintptr_t)input!=0; }
     }
     runtime_fault_recover=previous;
     return ok;
@@ -1178,18 +1181,22 @@ static int list_read(uint64_t list, uint64_t *oi, uint64_t *container, ListState
 /* The hook at the start of every list update (the game's thread): the list's container and
  * selection; a jump the pad thread asked for; its container's items found and measured. */
 static ABI void list_update(uint64_t list, uint64_t input) {
-    (void)input;
     if (!menu_mouse) return;
     const uint64_t now=host_monotonic_ns();
     uint64_t oi, container;
     ListState s;
-    if (!list_read(list,&oi,&container,&s)) return;
+    int focused=1;
+    if (!list_read(list,input,&oi,&container,&s,&focused)) return;
     int row, column, a=0, b=0, entry=-1, first=1;
     host_lock(&menu_lock);
     MenuContainer *c=container_of(container,1);
     const int fresh=c->list!=list || now-c->list_ns>=LIST_LIVE_NS;
     if (fresh) c->active_ns=now; /* (back) in front: a submenu over the menu that is still drawn */
     c->list=list; c->list_ns=c->touch_ns=now; c->behind=0; c->unanswered=0; c->list_rows=s.rows; c->list_columns=s.columns;
+    if (focused!=c->focused) {
+        menu_note("list %" PRIx64 " (container %" PRIx64 ") %s",list,container,focused ? "takes the input" : "updated without input");
+        c->focused=focused;
+    }
     const int selected=list_clip(&s,s.selected,&row,&column) ? item_add(oi,container,row,column,now) : -1;
     if (selected!=c->selected) { c->selected=selected; c->select_ns=c->active_ns=now; }
     for (int i=0;i<menu_item_count;++i) /* clips past the entries: hidden, maybe over the shown ones */
@@ -1265,16 +1272,17 @@ static void list_configure(unsigned char *code) {
  * pointer adds. Moving onto an item makes it the target, reached with d-pad presses toward it;
  * keys and the wheel stay free otherwise (a resting pointer does not pull the selection back).
  * The left button targets the item under the pointer and confirms on it; the right one cancels. */
-/* A list the game updates now: it takes input, alone or sharing the screen with another (an
- * inventory's tab bar and its items). */
-static int live_list(const MenuContainer *c, uint64_t now) {
-    return c && c->list && now-c->list_ns<LIST_LIVE_NS && !c->behind;
+/* A list the game updates now with the input on (by_focus: when any list has it; else every
+ * list it updates), alone or sharing the screen with another (an inventory's tab bar and its
+ * items). A parent menu still updated behind a submenu has the input off. */
+static int input_list(const MenuContainer *c, uint64_t now, int by_focus) {
+    return c && c->list && now-c->list_ns<LIST_LIVE_NS && !c->behind && (!by_focus || c->focused);
 }
-/* An item the pointer may act on: in the menu on top, or in any live list beside it. */
-static int pointable_item(int item, const MenuContainer *menu, uint64_t now) {
+/* An item the pointer may act on: in the menu on top, or in any input list beside it. */
+static int pointable_item(int item, const MenuContainer *menu, uint64_t now, int by_focus) {
     if (item<0 || item>=menu_item_count) return 0;
     if (menu_items[item].container==menu->container) return 1;
-    return live_list(menu,now) && live_list(container_of(menu_items[item].container,0),now);
+    return input_list(menu,now,by_focus) && input_list(container_of(menu_items[item].container,0),now,by_focus);
 }
 static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int window_h, uint32_t free_buttons) {
     const uint64_t now=host_monotonic_ns();
@@ -1282,7 +1290,8 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
     host_lock(&menu_lock);
     /* The menu on screen: the container whose selection moved last, among those touched lately. */
     MenuContainer *menu=NULL;
-    int menus=0, live_lists=0;
+    int menus=0, live_lists=0, by_focus=0;
+    for (int i=0;i<MAX_CONTAINERS;++i) by_focus|=input_list(&containers[i],now,0) && containers[i].focused;
     for (int i=0;i<MAX_CONTAINERS;++i) {
         MenuContainer *c=&containers[i];
         if (c->behind==COVERED) { if (c->select_ns>c->covered_ns) c->behind=0; }
@@ -1294,8 +1303,9 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
         const int items=cursor_items(c->container);
         if (!c->container || now-c->touch_ns>=MENU_IDLE_NS || (c->list ? items<1 : (c->selected<0 && items<2))) continue;
         ++menus;
-        live_lists+=live_list(c,now);
-        const int lost=c->list && now-c->list_ns>=LIST_LIVE_NS; /* its list is no longer updated: covered */
+        live_lists+=input_list(c,now,by_focus);
+        /* Its list is no longer updated (covered), or updated without the input (a submenu over it). */
+        const int lost=c->list && (now-c->list_ns>=LIST_LIVE_NS || (by_focus && !c->focused));
         if (!c->behind && !lost && (!menu || c->active_ns>menu->active_ns)) menu=c;
     }
     /* A press aimed at one container that another one answered: that one has the focus. */
@@ -1314,8 +1324,8 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
         const float sx=pointer_x*STAGE_W/window_w, sy=pointer_y*STAGE_H/window_h;
         hovered=hit(menu->container,sx,sy);
         /* Lists sharing the screen: the pointer works in each one the game updates. */
-        for (int i=0;i<MAX_CONTAINERS && hovered<0 && live_list(menu,now);++i)
-            if (&containers[i]!=menu && live_list(&containers[i],now)) hovered=hit(containers[i].container,sx,sy);
+        for (int i=0;i<MAX_CONTAINERS && hovered<0 && input_list(menu,now,by_focus);++i)
+            if (&containers[i]!=menu && input_list(&containers[i],now,by_focus)) hovered=hit(containers[i].container,sx,sy);
     }
     int moved=pointer_x!=last_pointer_x || pointer_y!=last_pointer_y;
     last_pointer_x=pointer_x; last_pointer_y=pointer_y;
@@ -1342,14 +1352,14 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
     if (!shown || !menu) { host_unlock(&menu_lock); return 0; }
     /* A list jumps once per item the pointer moves onto, whichever list it is in (a jump may
      * scroll other entries under it; a d-pad move elsewhere is not undone by a resting pointer). */
-    const int direct=live_list(menu,now);
+    const int direct=input_list(menu,now,by_focus);
     if (direct) { if (moved && hovered>=0 && hovered!=last_hovered && hovered!=blocked) nav_target=hovered; }
     else if (moved && hovered>=0 && hovered!=nav_target && hovered!=blocked) { nav_target=hovered; steps=visited_count=0; }
     last_hovered=hovered;
     if (hovered!=blocked) blocked=-1;
     if ((pressed&1) && hovered>=0) { nav_target=confirm_target=hovered; steps=visited_count=0; }
-    if (!pointable_item(nav_target,menu,now)) nav_target=-1;
-    if (!pointable_item(confirm_target,menu,now)) confirm_target=-1;
+    if (!pointable_item(nav_target,menu,now,by_focus)) nav_target=-1;
+    if (!pointable_item(confirm_target,menu,now,by_focus)) confirm_target=-1;
     /* The list the target is in (the menu on top, or a live list beside it). */
     const int target=nav_target>=0 ? nav_target : confirm_target;
     MenuContainer *lc=direct && target>=0 ? container_of(menu_items[target].container,0) : NULL;
