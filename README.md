@@ -220,7 +220,8 @@ pass), `BB_FSR4_PROFILE=1` (GPU time per FSR 4 pass), `BB_UPSCALER=taa|fsr3|fsr4
 `BB_LIVE_RES=1` (live resolution changes instead of the startup patch for outputs other than 1080p),
 `BB_PAD_RECORD=file` / `BB_PAD_REPLAY=file` (record a route with F9, replay it in scripted tests),
 `BB_MENU_PROBE=1` (the mouse in menus, a prototype: a menu frees the mouse, pointing at an item
-(or an option's value) selects it, in one jump in the game's lists, the left button confirms, the right one cancels; F7
+(or an option's value) selects it, in one jump in the game's lists, the left button confirms, the right one cancels, a click on an option's arrows or slider
+changes it; F7
 writes the game's live menu objects to `logs/menu-probe-*.txt`, F8 its next 4 seconds of calls into
 Scaleform, with the game functions that made them, to `logs/menu-trace-*.txt`), `BB_ASSETS_DIR=dir` (another `assets` folder),
 `BB_GC_BUDGET_MB=N` (texture cache budget, as on integrated GPUs), `BB_PRESENT_DUMP_TRIGGER=file`
