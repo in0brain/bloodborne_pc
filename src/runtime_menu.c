@@ -622,8 +622,8 @@ static void trace_finish(void) {
 #define MENU_IDLE_NS UINT64_C(300000000)   /* a container untouched this long: its menu closed */
 #define BOUNDS_NS UINT64_C(1000000000)     /* item bounds are measured again after this */
 #define MEASURES_PER_CALL 4
-#define PRESS_NS UINT64_C(50000000)
-#define GAP_NS UINT64_C(50000000)          /* released between presses: each is a new press */
+#define PRESS_NS UINT64_C(34000000)        /* two frames held, two released: the shortest steps the game takes */
+#define GAP_NS UINT64_C(34000000)          /* released between presses: each is a new press */
 #define SETTLE_NS UINT64_C(350000000)      /* a press that moved nothing this long: out of reach */
 #define REFRESH_NS UINT64_C(5000000)       /* a selection this fresh may be mid-refresh (Item_0_0 first) */
 #define MAX_STEPS 12                       /* presses toward one target before giving up on it */
@@ -661,9 +661,14 @@ typedef struct {
  * a submenu over the menu that is still drawn behind it). */
 typedef struct {
     uint64_t container, touch_ns, select_ns, probe_ns, active_ns;
-    uint64_t behind;           /* a press here moved this other container: in the background while it lives */
-    int selected;
+    uint64_t behind;           /* a press here moved this other container: in the background while it lives;
+                                * COVERED: presses here went unanswered (a screen over it the mouse does not
+                                * know, like the equipment slots), until its selection moves again */
+    uint64_t covered_ns;
+    int selected, unanswered;
 } MenuContainer;
+#define COVERED UINT64_MAX
+#define UNANSWERED_MAX 2
 
 static int menu_mouse;
 static HostMutex menu_lock=HOST_MUTEX_INIT;
@@ -706,7 +711,7 @@ static MenuContainer *container_of(uint64_t container, int add) {
         if (containers[i].touch_ns<oldest->touch_ns) oldest=&containers[i];
     }
     if (!add) return NULL;
-    *oldest=(MenuContainer){container,host_monotonic_ns(),0,0,0,0,-1};
+    *oldest=(MenuContainer){container,host_monotonic_ns(),0,0,0,0,0,-1,0};
     return oldest;
 }
 static int item_index(uint64_t container, int a, int b) {
@@ -865,7 +870,7 @@ static void menu_observe(uint64_t slot, const uint64_t *regs) {
         if (i>=0) {
             MenuContainer *c=container_of(menu_items[i].container,1);
             if (c->selected!=i) menu_note("selected Item_%d_%d (container %" PRIx64 ")",menu_items[i].a,menu_items[i].b,c->container);
-            c->selected=i; c->select_ns=c->touch_ns=c->active_ns=now;
+            c->selected=i; c->select_ns=c->touch_ns=c->active_ns=now; c->unanswered=0;
         }
     }
     MenuContainer *c=container_of(obj,0);
@@ -986,12 +991,12 @@ static int hit(uint64_t container, float sx, float sy) {
     }
     return found;
 }
-/* The direction on screen from one item to another, by their top left corners (an item's bounds
- * may reach far right or down with hidden text; the corners stay where the items are laid out). */
+/* The direction from one item to another by their names: Item_<row>_<column> in every menu seen
+ * (title, in-game menu, lists, options), rows down, columns right. Their bounds would mislead:
+ * a last entry's cursor can sit elsewhere (an options list's last line, to the right). */
 static uint32_t toward(const MenuItem *from, const MenuItem *to) {
-    const float dx=to->x0-from->x0, dy=to->y0-from->y0;
-    if ((dy<0 ? -dy : dy)>=(dx<0 ? -dx : dx)) return dy>0 ? PAD_DOWN : PAD_UP;
-    return dx>0 ? PAD_RIGHT : PAD_LEFT;
+    if (to->a!=from->a) return to->a>from->a ? PAD_DOWN : PAD_UP;
+    return to->b>from->b ? PAD_RIGHT : PAD_LEFT;
 }
 static int cursor_items(uint64_t container) {
     int n=0;
@@ -1008,14 +1013,17 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
     host_lock(&menu_lock);
     /* The menu on screen: the container whose selection moved last, among those touched lately. */
     MenuContainer *menu=NULL;
+    int menus=0;
     for (int i=0;i<MAX_CONTAINERS;++i) {
         MenuContainer *c=&containers[i];
-        if (c->behind) { /* back in front once the container that took the focus has closed */
+        if (c->behind==COVERED) { if (c->select_ns>c->covered_ns) c->behind=0; }
+        else if (c->behind) { /* back in front once the container that took the focus has closed */
             const MenuContainer *front=container_of(c->behind,0);
             if (!front || now-front->touch_ns>=MENU_IDLE_NS) c->behind=0;
         }
-        if (c->container && !c->behind && now-c->touch_ns<MENU_IDLE_NS && (c->selected>=0 || cursor_items(c->container)>=2) &&
-            (!menu || c->active_ns>menu->active_ns)) menu=c;
+        if (!c->container || now-c->touch_ns>=MENU_IDLE_NS || (c->selected<0 && cursor_items(c->container)<2)) continue;
+        ++menus;
+        if (!c->behind && (!menu || c->active_ns>menu->active_ns)) menu=c;
     }
     /* A press aimed at one container that another one answered: that one has the focus. */
     if (press_container && menu && menu->container!=press_container && menu->select_ns>press_ns) {
@@ -1026,7 +1034,7 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
         }
         press_container=0;
     }
-    const int shown=menu!=NULL;
+    const int shown=menus>0; /* the mouse stays free over a covered menu, but takes no steps there */
     int hovered=-1;
     const int selected=menu ? menu->selected : -1;
     if (menu && window_w>0 && window_h>0) hovered=hit(menu->container,pointer_x*STAGE_W/window_w,pointer_y*STAGE_H/window_h);
@@ -1047,11 +1055,11 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
         bbgpu_menu_active(shown,wx,wy);
         press_until=settle_until=0; blocked=nav_target=confirm_target=-1; steps=0;
         moved=0; /* where the pointer rests when a menu opens is not a choice */
-        if (shown) menu_note("on screen (container %" PRIx64 ")%s",menu->container,wx>=0 ? ", pointer on the selection" : "");
+        if (menu) menu_note("on screen (container %" PRIx64 ")%s",menu->container,wx>=0 ? ", pointer on the selection" : "");
     }
     const uint32_t pressed=free_buttons&~previous_free;
     previous_free=free_buttons;
-    if (!shown) { host_unlock(&menu_lock); return 0; }
+    if (!shown || !menu) { host_unlock(&menu_lock); return 0; }
     if (moved && hovered>=0 && hovered!=nav_target && hovered!=blocked) { nav_target=hovered; steps=visited_count=0; }
     if (hovered!=blocked) blocked=-1;
     if ((pressed&1) && hovered>=0) { nav_target=confirm_target=hovered; steps=visited_count=0; }
@@ -1079,6 +1087,13 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
             settle_until=0;
             if (nav_target>=0) menu_note("Item_%d_%d out of reach",menu_items[nav_target].a,menu_items[nav_target].b);
             blocked=nav_target; nav_target=confirm_target=-1;
+            /* Presses here keep going unanswered: something over it has the focus. */
+            MenuContainer *aimed=container_of(press_container,0);
+            if (aimed && ++aimed->unanswered>=UNANSWERED_MAX) {
+                aimed->behind=COVERED; aimed->covered_ns=now; aimed->unanswered=0;
+                menu_note("container %" PRIx64 " does not answer: covered",aimed->container);
+            }
+            press_container=0;
         }
     }
     if (nav_target>=0 && nav_target==selected) nav_target=-1;
