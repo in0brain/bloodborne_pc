@@ -644,10 +644,10 @@ static void trace_finish(void) {
  * stops updating has lost the focus (a screen over it, like the equipment slots over the in-game
  * menu): the mouse stays free, but its items take nothing. An options screen shows each row's
  * value beside the row's name, as a list of one clip or as a slider (a gauge between two arrows,
- * hooked at its update as well): pointing at a value selects its row; a click on an arrow steps
- * the value, one on a slider's bar (or a drag along it) sets it, as the keys would (the list's
- * SetSelection, the slider's SetValue: the game applies and sounds it). Menus without a list
- * widget take d-pad steps as above. */
+ * hooked at its update as well): pointing at a value selects its row; a click on a list's half
+ * presses left or right (the game steps it, around the ends: a switch toggles at every click), one
+ * on a slider's arrow steps it and one on its bar (or a drag along it) sets it (its SetValue: the
+ * game applies and sounds it). Menus without a list widget take d-pad steps as above. */
 #define MAX_ITEMS 256
 #define MAX_CONTAINERS 16
 #define STAGE_W 1920.0f
@@ -677,7 +677,6 @@ static void trace_finish(void) {
 #define LIST_SET_SELECTION 0x1ACF6B0u /* int SetSelection(list, entry): scrolls to it, moves the cursor; 1 done */
 #define LIST_PROLOGUE 20              /* push rbp ... sub rsp,0x98: the bytes the hook's jump replaces */
 #define LIST_LISTENER 0x30            /* object told of a new selection: vtable slot 2 (self, int *entry) */
-#define LIST_INVALIDATE 7             /* vtable slot: entries to redraw at the update's end (byte +0x2B1) */
 #define LIST_COUNT 0x70               /* int: entries */
 #define LIST_SELECTED 0x74            /* int: the selected entry */
 #define LIST_OVERRIDE 0x78            /* int: when >= 0, the selection instead of LIST_SELECTED */
@@ -779,8 +778,7 @@ typedef struct {
 #define UNANSWERED_MAX 2
 /* A list's state, read on its update. */
 typedef struct { int count, selected, columns, rows, first_column, first_row, wraps; } ListState;
-/* Pad thread -> list hook: select the entry under Item_<jump_a>_<jump_b> of jump_list (or the
- * jump_delta-th from its selection). */
+/* Pad thread -> list hook: select the entry under Item_<jump_a>_<jump_b> of jump_list. */
 enum { JUMP_IDLE, JUMP_POSTED, JUMP_TAKEN, JUMP_DONE };
 /* An options row's control beside its name, learnt on its update: a slider (its arrows and bar),
  * or a list of one clip (its arrows, LeftItem_0 and RightItem_0). */
@@ -814,7 +812,7 @@ static uint64_t press_container, press_ns; /* where the last d-pad press was aim
 static uint64_t press_until, gap_until, settle_until;
 static uint32_t confirm_button=PAD_CROSS, cancel_button=PAD_CIRCLE;
 /* The list hook and the jumps (under menu_lock). */
-static int jump_state=JUMP_IDLE, jump_a, jump_b, jump_delta, jump_target=-1, jump_moved;
+static int jump_state=JUMP_IDLE, jump_a, jump_b, jump_target=-1, jump_moved;
 static uint64_t jump_list, jump_ns;
 static uint64_t noted_lists[MAX_LIST_NOTES];
 static int listable;                 /* the list hook is in */
@@ -1275,19 +1273,8 @@ static int list_clip(const ListState *s, int entry, int *row, int *column) {
     *row=(int)(k/columns); *column=(int)(k%columns);
     return 1;
 }
-/* The entry `delta` from the selection (the d-pad's step): around when it wraps, else up to the
- * ends; -1 for an empty list. */
-static int list_step(const ListState *s, int delta) {
-    if (s->count<=0) return -1;
-    int64_t e=(int64_t)s->selected+delta;
-    if (s->wraps) e=((e%s->count)+s->count)%s->count;
-    else if (e<0) e=0;
-    else if (e>=s->count) e=s->count-1;
-    return (int)e;
-}
 typedef ABI int32_t (*SetSelectionFn)(uint64_t list, int32_t entry);
 typedef ABI void (*ListenerFn)(uint64_t self, int32_t *entry);
-typedef ABI void (*ListFn)(uint64_t list);
 /* Selects an entry as the update does after a key press: the widget's SetSelection (scrolling,
  * the cursor), then its listener and the cursor sound. On the game's thread, in the list's update,
  * without menu_lock (the widget calls the hooked interface). 1 when the selection moved. */
@@ -1479,15 +1466,17 @@ static ABI void slider_update(uint64_t slider, uint64_t input) {
         menu_note("slider %" PRIx64 " set to %d (asked %d)",slider,now_value,value);
     }
 }
+static int control_in_front(const Control *c, uint64_t now, int by_focus);
 /* The control part under a stage point: a live control's arrow (a little beyond its glyph), else
- * its bar (a little above and below it too: the track is 14 px high); -1 for none. */
-static int control_at(float sx, float sy, uint64_t now, int *part) {
+ * its bar (a little above and below it too: the track is 14 px high), on the screen in front; -1
+ * for none. */
+static int control_at(float sx, float sy, uint64_t now, int by_focus, int *part) {
     for (int k=0;k<PARTS;++k)
         for (int i=0;i<MAX_CONTROLS;++i) {
             const Control *c=&controls[i];
             const float m=k==PART_BAR ? 0 : ARROW_MARGIN;
             float r[4];
-            if (!c->object || now-c->seen_ns>=LIST_LIVE_NS || !control_part(c,k,r)) continue;
+            if (!c->object || now-c->seen_ns>=LIST_LIVE_NS || !control_part(c,k,r) || !control_in_front(c,now,by_focus)) continue;
             if (sx>=r[0]-m && sx<r[2]+m && sy>=r[1]-ARROW_MARGIN && sy<r[3]+ARROW_MARGIN) { *part=k; return i; }
         }
     return -1;
@@ -1524,8 +1513,8 @@ static ABI void list_update(uint64_t list, uint64_t input) {
     if (selected!=c->selected) { c->selected=selected; c->select_ns=c->active_ns=now; }
     for (int i=0;i<menu_item_count;++i) /* clips past the entries: hidden, maybe over the shown ones */
         if (menu_items[i].container==container) menu_items[i].absent=list_entry(&s,menu_items[i].a,menu_items[i].b)<0;
-    const int take=jump_state==JUMP_POSTED && jump_list==list, delta=take ? jump_delta : 0;
-    if (take) { a=jump_a; b=jump_b; entry=delta ? list_step(&s,delta) : list_entry(&s,a,b); jump_state=JUMP_TAKEN; }
+    const int take=jump_state==JUMP_POSTED && jump_list==list;
+    if (take) { a=jump_a; b=jump_b; entry=list_entry(&s,a,b); jump_state=JUMP_TAKEN; }
     const int probe_now=!c->probe_ns || now-c->probe_ns>PROBE_NS;
     if (probe_now) c->probe_ns=now;
     /* A list of one clip, an options row's value: a control with arrows. */
@@ -1551,8 +1540,6 @@ static ABI void list_update(uint64_t list, uint64_t input) {
     }
     if (take) {
         const int moved=entry>=0 && list_select(list,entry);
-        if (moved && s.rows<=1 && s.columns<=1) /* one clip shows another entry: redrawn by this update */
-            ((ListFn)(uintptr_t)guest_u64(guest_u64(list)+8*LIST_INVALIDATE))(list);
         list_state(list,&s);
         host_lock(&menu_lock);
         c=container_of(container,1);
@@ -1560,8 +1547,7 @@ static ABI void list_update(uint64_t list, uint64_t input) {
         if (now_selected!=c->selected) { c->selected=now_selected; c->select_ns=c->active_ns=now; }
         jump_moved=moved; jump_state=JUMP_DONE;
         host_unlock(&menu_lock);
-        if (delta) menu_note("step %+d: entry %d of %d, %s",delta,entry,s.count,moved ? "selected" : "not selectable");
-        else menu_note("jump to Item_%d_%d: entry %d of %d, %s",a,b,entry,s.count,moved ? "selected" : "not selectable");
+        menu_note("jump to Item_%d_%d: entry %d of %d, %s",a,b,entry,s.count,moved ? "selected" : "not selectable");
     }
     if (arrows_now) {
         static const char *const names[PARTS]={"LeftItem_0","RightItem_0",NULL};
@@ -1659,6 +1645,34 @@ static void window_point(float sx, float sy, int window_w, int window_h, float *
 static int input_list(const MenuContainer *c, uint64_t now, int by_focus) {
     return c && c->list && now-c->list_ns<LIST_LIVE_NS && !c->behind && (!by_focus || c->focused);
 }
+/* A control on the screen in front: its row is the selected one (its update has the input), or it
+ * stands beside a row of a list that has the input. Not one under a box over its screen (the
+ * game updates it still, without the input): a yes/no box's buttons over an options screen's
+ * sliders are the box's. */
+static int control_in_front(const Control *c, uint64_t now, int by_focus) {
+    if (c->focused) return 1;
+    float y0=0, y1=0;
+    int parts=0;
+    for (int k=0;k<PARTS;++k) {
+        float r[4];
+        if (!control_part(c,k,r)) continue;
+        if (!parts++ || r[1]<y0) y0=r[1];
+        if (parts==1 || r[3]>y1) y1=r[3];
+    }
+    const float middle=(y0+y1)/2;
+    for (int i=0;parts && i<MAX_CONTAINERS;++i) {
+        const MenuContainer *rows=&containers[i];
+        if (!input_list(rows,now,by_focus) || one_clip(rows) || rows->list_columns>1) continue;
+        const Spacing g=spacing(rows->container,0);
+        for (int j=0;j<menu_item_count;++j) {
+            float r[4];
+            if (!pointable(&menu_items[j],rows->container) || menu_items[j].approx) continue;
+            hit_rect(&menu_items[j],&g,r);
+            if (middle>=r[1] && middle<r[3]) return 1;
+        }
+    }
+    return 0;
+}
 /* An item the pointer may act on: in the menu on top, or in any input list beside it. */
 static int pointable_item(int item, const MenuContainer *menu, uint64_t now, int by_focus) {
     if (item<0 || item>=menu_item_count) return 0;
@@ -1706,7 +1720,7 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
         float sy;
         stage_point(pointer_x,pointer_y,window_w,window_h,&sx,&sy);
         hovered=hit(menu->container,sx,sy);
-        control=control_at(sx,sy,now,&part);
+        control=control_at(sx,sy,now,by_focus,&part);
         /* Lists sharing the screen: the pointer works in each one the game updates. */
         for (int i=0;i<MAX_CONTAINERS && hovered<0 && input_list(menu,now,by_focus);++i)
             if (&containers[i]!=menu && input_list(&containers[i],now,by_focus)) hovered=hit(containers[i].container,sx,sy);
@@ -1801,7 +1815,7 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
                     slider_target=c->object; slider_value=action_value; slider_relative=action_part!=PART_BAR;
                     slider_ns=now; slider_state=JUMP_POSTED;
                 } else if (action_part!=PART_BAR) {
-                    jump_list=c->object; jump_delta=action_value; jump_target=-1; jump_ns=now; jump_state=JUMP_POSTED;
+                    press_button=action_value<0 ? PAD_LEFT : PAD_RIGHT; press_until=now+PRESS_NS;
                 }
                 menu_note("%s %s: %+d",c->kind==CONTROL_SLIDER ? "slider" : "values",
                           action_part==PART_LEFT ? "left arrow" : action_part==PART_RIGHT ? "right arrow" : "bar",action_value);
@@ -1815,7 +1829,7 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
         if (pressed&4) {
             press_button=cancel_button; press_until=now+PRESS_NS; nav_target=confirm_target=-1; menu_note("cancel");
         } else if (nav_target>=0 && jump_state==JUMP_IDLE) {
-            jump_list=lc->list; jump_a=menu_items[nav_target].a; jump_b=menu_items[nav_target].b; jump_delta=0;
+            jump_list=lc->list; jump_a=menu_items[nav_target].a; jump_b=menu_items[nav_target].b;
             jump_target=nav_target; jump_ns=now; jump_state=JUMP_POSTED;
             nav_target=-1;
         } else if (confirm_target>=0 && confirm_target==lc->selected && jump_state==JUMP_IDLE && bar) {
