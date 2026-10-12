@@ -73,6 +73,9 @@ static ABI int32_t user_event(int32_t *event) {
 
 /* ---- SystemService ---- */
 static int language(void) { const char *v=getenv("BB_LANGUAGE"); return v ? atoi(v) : 1; }
+/* BB_ENTER_BUTTON=circle|cross: the button that confirms (run_game.py sets it from bbport.ini
+ * enter_button; auto follows the dump's region, as that region's consoles are set up). */
+static int enter_button(void) { const char *v=getenv("BB_ENTER_BUTTON"); return v && !strcmp(v,"circle") ? 0 : 1; }
 static ABI int32_t system_param(int32_t id,int32_t *value) {
     if (!value) return SYSTEM_PARAMETER;
     switch (id) {
@@ -86,7 +89,7 @@ static ABI int32_t system_param(int32_t id,int32_t *value) {
 #endif
     case 5: *value=0; break;                    /* summer time */
     case 7: *value=0; break;                    /* parental level off */
-    case 1000: *value=1; break;                 /* enter button = cross */
+    case 1000: *value=enter_button(); break;    /* enter button: 0 circle, 1 cross */
     default: fprintf(stderr,"STOP: unsupported system parameter %d\n",id); exit(21);
     }
     return 0;

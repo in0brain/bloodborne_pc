@@ -52,6 +52,10 @@ void runtime_sema_report(void);
 unsigned runtime_sema_waiters(uint32_t id);
 uintptr_t runtime_time_resolve(const char *name);
 void runtime_content_configure(const uint32_t values[5]);
+/* Mouse camera (runtime_camera.c): checks the v1.09 camera code once the image is mapped; the
+ * pad thread then hands it the captured mouse's motion and whether the right stick is used. */
+void runtime_camera_configure(unsigned char *image, uint64_t size);
+void runtime_camera_update(float dx, float dy, int captured, float sensitivity, int invert_y, int stick_camera);
 uintptr_t runtime_content_resolve(const char *name);
 void runtime_content_report(void);
 typedef struct { const char *name; void *function; } RuntimeExport;

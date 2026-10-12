@@ -389,7 +389,17 @@ void Menu() {
         }
     }
 
+    ImGui::SeparatorText(Tr("Keyboard and mouse"));
+    Checkbox("Mouse camera (F1 releases the mouse)", s.mouse_camera);
+    Hint("The captured mouse turns the camera directly; the right stick or the camera keys hand "
+         "it back to the game. Bindings, several per control (key_r3=c,mouse_middle,left_alt), "
+         "are the key_* lines of bbport.ini.");
+    Slider("Mouse sensitivity", s.mouse_sensitivity, 0.1f, 5.0f);
+    Checkbox("Invert vertical mouse", s.mouse_invert_y);
+    Slider("Walk (stick push with key_walk, Left Ctrl)", s.walk_stick, 0.1f, 0.9f);
+
     ImGui::SeparatorText(Tr("Other"));
+    Checkbox("Borderless fullscreen (F11)", s.fullscreen);
     Checkbox("FPS counter in the corner", s.show_fps);
     // Each language under its own name, so the switch reads the same in both.
     static const char* languages[] = {"English", "Русский"};
