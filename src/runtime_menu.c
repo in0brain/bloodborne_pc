@@ -632,7 +632,8 @@ static void trace_finish(void) {
  * top left corner, each waiting for the selection to move (a selection unknown yet is revealed
  * by one press; one that comes back to an item already passed gives up: a list too short, an
  * empty row); the left button confirms, the right one cancels. Menu movies are 1920x1080
- * stages over the window.
+ * stages over the game's picture, letterboxed in the window as the presenter fits it: positions
+ * are stage units at any resolution.
  *
  * Most menus are the game's list widget: a grid of those clips showing a scrolled run of entries,
  * the selection kept in the widget. A hook at the start of its per-frame update (every list type
@@ -1369,6 +1370,29 @@ static void control_parts(uint64_t object, const float part[PARTS][4], const int
     host_unlock(&menu_lock);
 }
 typedef ABI void (*SetValueFn)(uint64_t slider, int32_t value, int32_t notify, uint64_t sound, uint64_t name);
+/* A slider gauge's track, measured: in optionsetting.gfx the "Bar" clip (100 frames) holds a
+ * background (child 0, 311x14 around the track), a mask (child 1, 305x7, sliding from all left of
+ * the fill at frame 1 to over it at frame 100) and the fill it uncovers (child 2, 305x7, still): the
+ * value's range. The fill's bounds are its whole length (the mask only hides it); the clip's own
+ * bounds hold the mask too, wherever it is. 0 for a gauge built otherwise. */
+#define GAUGE_CHILDREN 3
+#define GAUGE_FILL 2
+static int gauge_track(uint64_t oi, uint64_t bar, const float bounds[4], float out[4]) {
+    const GetMemberFn get=(GetMemberFn)interface_original[5];
+    const InvokeFn invoke=(InvokeFn)interface_original[7];
+    GfxValue count, index, fill;
+    memset(&count,0,sizeof(count)); memset(&index,0,sizeof(index)); memset(&fill,0,sizeof(fill));
+    double children=0;
+    const int built=(get(oi,bar,"numChildren",&count,1)&0xFF) && number_of(&count,&children) && children==GAUGE_CHILDREN;
+    value_release(&count);
+    if (!built) return 0;
+    const double at=GAUGE_FILL;
+    index.type=5; /* a Number */
+    memcpy(&index.value,&at,8);
+    const int ok=(invoke(oi,bar,&fill,"getChildAt",&index,1,1)&0xFF) && (fill.type&0x0F)==10 && stage_bounds(oi,fill.value,out);
+    value_release(&fill);
+    return ok && out[2]-out[0]>16 && out[0]>=bounds[0]-1 && out[2]<=bounds[2]+1;
+}
 static const int slider_holders[PARTS]={SLIDER_LEFT,SLIDER_RIGHT,SLIDER_BAR};
 /* A slider's state and its clips (0 for one that is not a display object of this interface), and
  * whether its clip holders are this class's (another layout is left alone). Guarded, as list_read. */
@@ -1425,14 +1449,15 @@ static ABI void slider_update(uint64_t slider, uint64_t input) {
         int ok[PARTS];
         measuring=1;
         for (int k=0;k<PARTS;++k) ok[k]=clip[k] && stage_bounds(oi,clip[k],part[k]);
+        float *bar=part[PART_BAR], track[4];
+        const int measured=ok[PART_BAR] && gauge_track(oi,clip[PART_BAR],bar,track);
         measuring=0;
-        /* The gauge is a fill as long as its track sliding under it, from all left of the track
-         * (empty) to all over it (full): its bounds reach left of the track by the empty part.
-         * The track is the fill's length, at their right. */
-        float *bar=part[PART_BAR];
-        if (ok[PART_BAR] && s.max>s.min) {
-            const float full=(float)(s.value-s.min)/(float)(s.max-s.min), track=(bar[2]-bar[0])/(2-full);
-            if (full>=0 && full<=1 && track>8) bar[0]=bar[2]-track;
+        if (measured) { bar[0]=track[0]; bar[2]=track[2]; } /* its height: the clip's (the fill is 7 px) */
+        else if (ok[PART_BAR] && s.max>s.min) {
+            /* Another gauge: as that one, the clip's bounds reach left of the track by the mask's
+             * share still off it, (1 - full) of the track's length. */
+            const float full=(float)(s.value-s.min)/(float)(s.max-s.min), length=(bar[2]-bar[0])/(2-full);
+            if (full>=0 && full<=1 && length>8) bar[0]=bar[2]-length;
         }
         control_parts(slider,(const float (*)[4])part,ok);
         if (fresh || !ok[PART_BAR])
@@ -1440,8 +1465,8 @@ static ABI void slider_update(uint64_t slider, uint64_t input) {
                       part[PART_BAR][0],part[PART_BAR][1],part[PART_BAR][2],part[PART_BAR][3],
                       part[PART_LEFT][0],part[PART_LEFT][2],part[PART_RIGHT][0],part[PART_RIGHT][2]);
         if (first)
-            printf("Menu mouse: slider %" PRIx64 " (%d in %d..%d), track (%.0f,%.0f)-(%.0f,%.0f), arrows %.0f..%.0f and %.0f..%.0f\n",
-                   slider,s.value,s.min,s.max,bar[0],bar[1],bar[2],bar[3],
+            printf("Menu mouse: slider %" PRIx64 " (%d in %d..%d), track (%.0f,%.0f)-(%.0f,%.0f) %s, arrows %.0f..%.0f and %.0f..%.0f\n",
+                   slider,s.value,s.min,s.max,bar[0],bar[1],bar[2],bar[3],measured ? "measured" : "estimated",
                    part[PART_LEFT][0],part[PART_LEFT][2],part[PART_RIGHT][0],part[PART_RIGHT][2]);
     }
     if (take) {
@@ -1455,7 +1480,7 @@ static ABI void slider_update(uint64_t slider, uint64_t input) {
     }
 }
 /* The control part under a stage point: a live control's arrow (a little beyond its glyph), else
- * its bar; -1 for none. */
+ * its bar (a little above and below it too: the track is 14 px high); -1 for none. */
 static int control_at(float sx, float sy, uint64_t now, int *part) {
     for (int k=0;k<PARTS;++k)
         for (int i=0;i<MAX_CONTROLS;++i) {
@@ -1463,7 +1488,7 @@ static int control_at(float sx, float sy, uint64_t now, int *part) {
             const float m=k==PART_BAR ? 0 : ARROW_MARGIN;
             float r[4];
             if (!c->object || now-c->seen_ns>=LIST_LIVE_NS || !control_part(c,k,r)) continue;
-            if (sx>=r[0]-m && sx<r[2]+m && sy>=r[1]-m && sy<r[3]+m) { *part=k; return i; }
+            if (sx>=r[0]-m && sx<r[2]+m && sy>=r[1]-ARROW_MARGIN && sy<r[3]+ARROW_MARGIN) { *part=k; return i; }
         }
     return -1;
 }
@@ -1607,6 +1632,23 @@ static void list_configure(unsigned char *code) {
     }
     slidable=!hook_function(code+TRAMPOLINE_AT+TRAMPOLINE_SIZE,SLIDER_UPDATE,SLIDER_PROLOGUE,slider_update);
 }
+/* The menus' 1920x1080 stage in the window (points): the presenter fits the game's 16:9 picture
+ * into it, centred, with bars beside a wider one or above and below a taller one (FitImage). */
+static float stage_scale(int window_w, int window_h, float *x, float *y) {
+    const float sw=(float)window_w/STAGE_W, sh=(float)window_h/STAGE_H, scale=sw<sh ? sw : sh;
+    *x=((float)window_w-STAGE_W*scale)/2; *y=((float)window_h-STAGE_H*scale)/2;
+    return scale;
+}
+static void stage_point(float pointer_x, float pointer_y, int window_w, int window_h, float *sx, float *sy) {
+    float x, y;
+    const float scale=stage_scale(window_w,window_h,&x,&y);
+    *sx=(pointer_x-x)/scale; *sy=(pointer_y-y)/scale;
+}
+static void window_point(float sx, float sy, int window_w, int window_h, float *pointer_x, float *pointer_y) {
+    float x, y;
+    const float scale=stage_scale(window_w,window_h,&x,&y);
+    *pointer_x=x+sx*scale; *pointer_y=y+sy*scale;
+}
 /* Pad thread: whether a menu is on screen (the window frees the mouse), and the buttons the
  * pointer adds. Moving onto an item makes it the target, reached with d-pad presses toward it;
  * keys and the wheel stay free otherwise (a resting pointer does not pull the selection back).
@@ -1661,8 +1703,8 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
     float sx=0;
     const int selected=menu ? menu->selected : -1;
     if (menu && window_w>0 && window_h>0) {
-        const float sy=pointer_y*STAGE_H/window_h;
-        sx=pointer_x*STAGE_W/window_w;
+        float sy;
+        stage_point(pointer_x,pointer_y,window_w,window_h,&sx,&sy);
         hovered=hit(menu->container,sx,sy);
         control=control_at(sx,sy,now,&part);
         /* Lists sharing the screen: the pointer works in each one the game updates. */
@@ -1686,7 +1728,7 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
             const Spacing g=spacing(menu->container,menu_items[selected].approx);
             hit_rect(&menu_items[selected],&g,r);
             if (menu_items[selected].approx) { r[2]=r[0]+g.pitch[0]; r[3]=r[1]+g.pitch[1]; }
-            wx=(r[0]+r[2])/2*window_w/STAGE_W; wy=(r[1]+r[3])/2*window_h/STAGE_H;
+            window_point((r[0]+r[2])/2,(r[1]+r[3])/2,window_w,window_h,&wx,&wy);
             last_pointer_x=wx; last_pointer_y=wy;
         }
         bbgpu_menu_active(shown,wx,wy);
