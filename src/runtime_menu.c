@@ -676,6 +676,7 @@ static void trace_finish(void) {
 #define LIST_SET_SELECTION 0x1ACF6B0u /* int SetSelection(list, entry): scrolls to it, moves the cursor; 1 done */
 #define LIST_PROLOGUE 20              /* push rbp ... sub rsp,0x98: the bytes the hook's jump replaces */
 #define LIST_LISTENER 0x30            /* object told of a new selection: vtable slot 2 (self, int *entry) */
+#define LIST_INVALIDATE 7             /* vtable slot: entries to redraw at the update's end (byte +0x2B1) */
 #define LIST_COUNT 0x70               /* int: entries */
 #define LIST_SELECTED 0x74            /* int: the selected entry */
 #define LIST_OVERRIDE 0x78            /* int: when >= 0, the selection instead of LIST_SELECTED */
@@ -794,6 +795,7 @@ typedef struct {
 #define MAX_CONTROLS 16
 #define ACTION_NS UINT64_C(500000000)  /* a click on a control waits this long for its row to be selected */
 #define ARROW_MARGIN 8.0f               /* an arrow takes clicks this far beyond its glyph */
+#define VALUE_REACH 24.0f               /* a value without the widget's arrows: its halves reach this far out */
 
 static int menu_mouse;
 static HostMutex menu_lock=HOST_MUTEX_INIT;
@@ -1160,6 +1162,23 @@ static int hit(uint64_t container, float sx, float sy) {
 static int one_clip(const MenuContainer *c) {
     return c && c->list && c->list_rows<=1 && c->list_columns<=1;
 }
+/* A control's part on the stage; 0 for none. A list of one clip without the widget's arrows (an
+ * options value draws its own in its highlight) is split at its clip's middle: the left half
+ * steps back, the right half on. */
+static int control_part(const Control *c, int k, float r[4]) {
+    memcpy(r,c->part[k],sizeof(c->part[k]));
+    if (r[2]>r[0] || c->kind!=CONTROL_VALUES || k==PART_BAR || c->part[!k][2]>c->part[!k][0]) return r[2]>r[0];
+    for (int i=0;i<menu_item_count;++i) {
+        const MenuItem *m=&menu_items[i];
+        if (!pointable(m,c->container) || m->approx || m->x1<=m->x0) continue;
+        const float mid=(m->x0+m->x1)/2;
+        r[0]=k==PART_LEFT ? m->x0-VALUE_REACH : mid;
+        r[2]=k==PART_LEFT ? mid : m->x1+VALUE_REACH;
+        r[1]=m->y0; r[3]=m->y1;
+        return 1;
+    }
+    return 0;
+}
 /* The row of a one-column list whose value the pointer is on: in the band of the row at the
  * pointer's height, within the clip of a value the game updates beside the rows (the selected
  * row's at least; the others may stand still). -1 elsewhere. */
@@ -1193,8 +1212,8 @@ static int value_row(const MenuContainer *rows, float sx, float sy, uint64_t now
         float x0=0, x1=0, y0=0, y1=0;
         int parts=0;
         for (int k=0;k<PARTS && c->object && now-c->seen_ns<LIST_LIVE_NS;++k) {
-            const float *r=c->part[k];
-            if (r[2]<=r[0]) continue;
+            float r[4];
+            if (!control_part(c,k,r)) continue;
             if (!parts++) { x0=r[0]; y0=r[1]; x1=r[2]; y1=r[3]; continue; }
             if (r[0]<x0) x0=r[0];
             if (r[1]<y0) y0=r[1];
@@ -1267,6 +1286,7 @@ static int list_step(const ListState *s, int delta) {
 }
 typedef ABI int32_t (*SetSelectionFn)(uint64_t list, int32_t entry);
 typedef ABI void (*ListenerFn)(uint64_t self, int32_t *entry);
+typedef ABI void (*ListFn)(uint64_t list);
 /* Selects an entry as the update does after a key press: the widget's SetSelection (scrolling,
  * the cursor), then its listener and the cursor sound. On the game's thread, in the list's update,
  * without menu_lock (the widget calls the hooked interface). 1 when the selection moved. */
@@ -1406,15 +1426,23 @@ static ABI void slider_update(uint64_t slider, uint64_t input) {
         measuring=1;
         for (int k=0;k<PARTS;++k) ok[k]=clip[k] && stage_bounds(oi,clip[k],part[k]);
         measuring=0;
+        /* The gauge is a fill as long as its track sliding under it, from all left of the track
+         * (empty) to all over it (full): its bounds reach left of the track by the empty part.
+         * The track is the fill's length, at their right. */
+        float *bar=part[PART_BAR];
+        if (ok[PART_BAR] && s.max>s.min) {
+            const float full=(float)(s.value-s.min)/(float)(s.max-s.min), track=(bar[2]-bar[0])/(2-full);
+            if (full>=0 && full<=1 && track>8) bar[0]=bar[2]-track;
+        }
         control_parts(slider,(const float (*)[4])part,ok);
         if (fresh || !ok[PART_BAR])
             menu_note("slider %" PRIx64 ": bar (%.0f,%.0f)-(%.0f,%.0f), arrows %.0f..%.0f and %.0f..%.0f",slider,
                       part[PART_BAR][0],part[PART_BAR][1],part[PART_BAR][2],part[PART_BAR][3],
                       part[PART_LEFT][0],part[PART_LEFT][2],part[PART_RIGHT][0],part[PART_RIGHT][2]);
         if (first)
-            printf("Menu mouse: slider %" PRIx64 " (%d in %d..%d), bar (%.0f,%.0f)-(%.0f,%.0f)%s\n",slider,s.value,s.min,s.max,
-                   part[PART_BAR][0],part[PART_BAR][1],part[PART_BAR][2],part[PART_BAR][3],
-                   ok[PART_LEFT] && ok[PART_RIGHT] ? "" : ", arrows not measured");
+            printf("Menu mouse: slider %" PRIx64 " (%d in %d..%d), track (%.0f,%.0f)-(%.0f,%.0f), arrows %.0f..%.0f and %.0f..%.0f\n",
+                   slider,s.value,s.min,s.max,bar[0],bar[1],bar[2],bar[3],
+                   part[PART_LEFT][0],part[PART_LEFT][2],part[PART_RIGHT][0],part[PART_RIGHT][2]);
     }
     if (take) {
         ((SetValueFn)(uintptr_t)(image+SLIDER_SET_VALUE))(slider,value,1,SLIDER_SOUND_ID,(uintptr_t)image+SLIDER_SOUND);
@@ -1432,8 +1460,9 @@ static int control_at(float sx, float sy, uint64_t now, int *part) {
     for (int k=0;k<PARTS;++k)
         for (int i=0;i<MAX_CONTROLS;++i) {
             const Control *c=&controls[i];
-            const float *r=c->part[k], m=k==PART_BAR ? 0 : ARROW_MARGIN;
-            if (!c->object || now-c->seen_ns>=LIST_LIVE_NS || r[2]<=r[0]) continue;
+            const float m=k==PART_BAR ? 0 : ARROW_MARGIN;
+            float r[4];
+            if (!c->object || now-c->seen_ns>=LIST_LIVE_NS || !control_part(c,k,r)) continue;
             if (sx>=r[0]-m && sx<r[2]+m && sy>=r[1]-m && sy<r[3]+m) { *part=k; return i; }
         }
     return -1;
@@ -1480,6 +1509,7 @@ static ABI void list_update(uint64_t list, uint64_t input) {
         Control *v=control_of(list,1);
         v->kind=CONTROL_VALUES; v->container=container; v->focused=focused; v->seen_ns=now;
         arrows_now=!bounds_broken && (!v->bounds_ns || now-v->bounds_ns>BOUNDS_NS);
+        if (arrows_now && !v->bounds_ns) arrows_now=2; /* the first time: printed */
         if (arrows_now) v->bounds_ns=now;
     }
     if (fresh) {
@@ -1496,6 +1526,8 @@ static ABI void list_update(uint64_t list, uint64_t input) {
     }
     if (take) {
         const int moved=entry>=0 && list_select(list,entry);
+        if (moved && s.rows<=1 && s.columns<=1) /* one clip shows another entry: redrawn by this update */
+            ((ListFn)(uintptr_t)guest_u64(guest_u64(list)+8*LIST_INVALIDATE))(list);
         list_state(list,&s);
         host_lock(&menu_lock);
         c=container_of(container,1);
@@ -1514,6 +1546,9 @@ static ABI void list_update(uint64_t list, uint64_t input) {
         for (int k=0;k<PART_BAR;++k) ok[k]=child_bounds(oi,container,names[k],part[k]);
         measuring=0;
         control_parts(list,(const float (*)[4])part,ok);
+        if (arrows_now==2 && first)
+            printf("Menu mouse: list %" PRIx64 " arrows %.0f..%.0f and %.0f..%.0f at %.0f%s\n",list,part[PART_LEFT][0],part[PART_LEFT][2],
+                   part[PART_RIGHT][0],part[PART_RIGHT][2],part[PART_LEFT][1],ok[PART_LEFT] && ok[PART_RIGHT] ? "" : " (none: its clip's halves)");
     }
     scan_container(oi,container,probe_now,!bounds_broken,selected,now);
 }
