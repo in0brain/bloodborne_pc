@@ -101,8 +101,14 @@ bool WindowSDL::PollEvents() {
     }
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
-        BbInput::Observe(event);
-        if (text_active && (event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_KEY_DOWN)) {
+        // Keys typed into the text box press no controls: the game would take them as presses
+        // on its text field (another dialog for each confirm press).
+        const bool typing =
+            text_active && (event.type == SDL_EVENT_TEXT_INPUT || event.type == SDL_EVENT_KEY_DOWN);
+        if (!typing) {
+            BbInput::Observe(event);
+        }
+        if (typing) {
             std::scoped_lock lock{text_mutex};
             if (event.type == SDL_EVENT_TEXT_INPUT) {
                 text += event.text.text;
