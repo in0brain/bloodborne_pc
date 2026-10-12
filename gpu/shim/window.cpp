@@ -84,6 +84,7 @@ void WindowSDL::UpdateTextTitle() {
     const std::string title = text_active ? base_title + " \u2014 " + text_prompt + ": " + text + "_  (Enter = OK, Esc = cancel)"
                                           : base_title;
     SDL_SetWindowTitle(window, title.c_str());
+    BbOverlay::SetTextEntry(text_active, text_prompt, text);
 }
 
 bool WindowSDL::PollEvents() {
@@ -92,6 +93,10 @@ bool WindowSDL::PollEvents() {
         if (text_requested) { // SDL text input must be toggled from the window thread
             text_requested = false;
             text_active = true;
+            int w = 0, h = 0;
+            SDL_GetWindowSize(window, &w, &h);
+            const SDL_Rect area = BbOverlay::TextEntryArea(w, h);
+            SDL_SetTextInputArea(window, &area, 0);
             SDL_StartTextInput(window);
             UpdateTextTitle();
         }
