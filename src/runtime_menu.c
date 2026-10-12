@@ -644,7 +644,8 @@ static void trace_finish(void) {
  * stops updating has lost the focus (a screen over it, like the equipment slots over the in-game
  * menu): the mouse stays free, but its items take nothing. An options screen shows each row's
  * value beside the row's name, as a list of one clip or as a slider (a gauge between two arrows,
- * hooked at its update as well): pointing at a value selects its row; a click on a list's half
+ * hooked at its update as well), a dropdown or a text field: pointing at a value selects its row
+ * (a click on a dropdown's or a text field's confirms it, as on the row's name); a click on a list's half
  * presses left or right (the game steps it, around the ends: a switch toggles at every click), one
  * on a slider's arrow steps it and one on its bar (or a drag along it) sets it (its SetValue: the
  * game applies and sounds it). Menus without a list widget take d-pad steps as above. */
@@ -759,6 +760,8 @@ typedef struct {
     uint64_t bounds_ns, seen_ns;
     int approx;                /* from display info: the item's origin only */
     int whole;                 /* the item's bounds, not its cursor's (hidden text may widen them) */
+    float value_x0, value_x1;  /* an options row's value beside its name that stands for the row (a
+                                * dropdown's current item, a text field); none where x1 <= x0 */
     int absent;                /* a list's clip that shows no entry (a dialog's second button, rows past the end) */
 } MenuItem;
 /* active_ns: when its selection last moved or its items were first found (the newest is on top:
@@ -914,8 +917,9 @@ static int bounds_of(uint64_t oi, uint64_t clip, const GfxValue *stage, float ou
  * alive (the game is calling it), so the item is fetched from it afresh and never kept: menus
  * rebuild their clips. getBounds(stage) where the interface reaches AS3 properties: the cursor's,
  * else the item's (*whole); else the item's and the container's display info (x, y, scale) give
- * the item's origin (*approx). */
-static int measure(uint64_t oi, uint64_t container, int a, int b, float out[4], int *approx, int *whole) {
+ * the item's origin (*approx). An options row's value too (row_value; value[2] <= value[0]: none). */
+static int row_value(uint64_t oi, uint64_t item, float out[4]);
+static int measure(uint64_t oi, uint64_t container, int a, int b, float out[4], int *approx, int *whole, float value[4]) {
     const GetMemberFn get=(GetMemberFn)interface_original[5];
     const DisplayFn display=(DisplayFn)interface_original[28];
     GfxValue item, stage;
@@ -924,7 +928,9 @@ static int measure(uint64_t oi, uint64_t container, int a, int b, float out[4], 
     snprintf(name,sizeof(name),"Item_%d_%d",a,b);
     int ok=0;
     *approx=*whole=0;
+    memset(value,0,4*sizeof(*value));
     if ((get(oi,container,name,&item,1)&0xFF) && (item.type&0x0F)==10) {
+        if (!row_value(oi,item.value,value)) memset(value,0,4*sizeof(*value));
         if ((get(oi,item.value,"stage",&stage,1)&0xFF) && ((stage.type&0x0F)==10 || (stage.type&0x0F)==8)) {
             GfxValue cursor;
             memset(&cursor,0,sizeof(cursor));
@@ -1058,14 +1064,16 @@ static void scan_container(uint64_t oi, uint64_t container, int probe_now, int m
         ++n;
         float r[4]={0,0,0,0};
         int approx=0, whole=0;
+        float value[4];
         measuring=1;
-        const int ok=measure(oi,container,m.a,m.b,r,&approx,&whole);
+        const int ok=measure(oi,container,m.a,m.b,r,&approx,&whole,value);
         measuring=0;
         host_lock(&menu_lock);
         MenuItem *t=&menu_items[index];
         if (t->container==container && t->a==m.a && t->b==m.b) {
             if (ok) { t->x0=r[0]; t->y0=r[1]; t->x1=r[2]; t->y1=r[3]; t->approx=approx; t->whole=whole; }
             else { t->x1=t->x0; t->y1=t->y0; t->approx=0; } /* never hit; tried again after BOUNDS_NS */
+            t->value_x0=value[0]; t->value_x1=value[2];
         }
         host_unlock(&menu_lock);
         menu_note("bounds Item_%d_%d %s (%.0f,%.0f)-(%.0f,%.0f)",m.a,m.b,!ok ? "failed" : approx ? "origin" : "ok",
@@ -1196,6 +1204,10 @@ static int value_row(const MenuContainer *rows, float sx, float sy, uint64_t now
         if (sy>=r[1] && sy<r[3] && (row<0 || r[3]-r[1]<height)) { row=i; height=r[3]-r[1]; }
     }
     if (row<0) return -1;
+    /* Its own value (a dropdown's current item: a click opens the list, as one on its name). */
+    if (menu_items[row].value_x1>menu_items[row].value_x0 && sx>=menu_items[row].value_x0-ARROW_MARGIN &&
+        sx<menu_items[row].value_x1+ARROW_MARGIN)
+        return row;
     for (int c=0;c<MAX_CONTAINERS;++c) {
         const MenuContainer *v=&containers[c];
         if (v==rows || !one_clip(v) || now-v->list_ns>=LIST_LIVE_NS) continue;
@@ -1344,6 +1356,37 @@ static int child_bounds(uint64_t oi, uint64_t container, const char *name, float
     memset(&child,0,sizeof(child));
     const int ok=(get(oi,container,name,&child,1)&0xFF) && (child.type&0x0F)==10 && stage_bounds(oi,child.value,out);
     value_release(&child);
+    return ok;
+}
+/* A clip's visible flag (true when it cannot be read). */
+static int clip_visible(uint64_t oi, uint64_t clip) {
+    const GetMemberFn get=(GetMemberFn)interface_original[5];
+    GfxValue visible;
+    memset(&visible,0,sizeof(visible));
+    const int read=(get(oi,clip,"visible",&visible,1)&0xFF) && (visible.type&0x0F)==2; /* a Boolean */
+    const int shown=!read || (visible.value&0xFF)!=0;
+    value_release(&visible);
+    return shown;
+}
+/* An options row's value beside its name when it stands for the row: a dropdown's current item
+ * (a click opens the list) or a text field (a click opens the text dialog). In optionsetting.gfx
+ * a row's "Widgets" holds a TextInput, a ComboBox (a list of one clip), a Slider and a
+ * DropdownList, the row's own shown; the ComboBox and the Slider are controls of their own. */
+static int row_value(uint64_t oi, uint64_t item, float out[4]) {
+    static const char *const kinds[][2]={{"DropdownList","CurrentItem"},{"TextInput","Text_0"}};
+    const GetMemberFn get=(GetMemberFn)interface_original[5];
+    GfxValue widgets;
+    memset(&widgets,0,sizeof(widgets));
+    int ok=0;
+    if ((get(oi,item,"Widgets",&widgets,1)&0xFF) && (widgets.type&0x0F)==10)
+        for (size_t k=0;k<sizeof(kinds)/sizeof(*kinds) && !ok;++k) {
+            GfxValue widget;
+            memset(&widget,0,sizeof(widget));
+            if ((get(oi,widgets.value,kinds[k][0],&widget,1)&0xFF) && (widget.type&0x0F)==10 && clip_visible(oi,widget.value))
+                ok=child_bounds(oi,widget.value,kinds[k][1],out) && out[2]-out[0]>4;
+            value_release(&widget);
+        }
+    value_release(&widgets);
     return ok;
 }
 /* Measured parts into a control (none where a measurement failed). */
