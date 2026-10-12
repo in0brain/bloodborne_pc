@@ -780,6 +780,9 @@ typedef struct {
     int whole;                 /* the item's bounds, not its cursor's (hidden text may widen them) */
     float value_x0, value_x1;  /* an options row's value beside its name that stands for the row (a
                                 * dropdown's current item, a text field); none where x1 <= x0 */
+    int select_only;           /* the row is its Cursor alone, a highlight over what is drawn elsewhere
+                                * (levelup.gfx's attributes, iconhelp.gfx): a click selects it and
+                                * confirms nothing (a level-up's confirm asks to level up) */
     int absent;                /* a list's clip that shows no entry (a dialog's second button, rows past the end) */
 } MenuItem;
 /* active_ns: when its selection last moved or its items were first found (the newest is on top:
@@ -938,7 +941,8 @@ static int bounds_of(uint64_t oi, uint64_t clip, const GfxValue *stage, float ou
  * else the item's (*whole); else the item's and the container's display info (x, y, scale) give
  * the item's origin (*approx). An options row's value too (row_value; value[2] <= value[0]: none). */
 static int row_value(uint64_t oi, uint64_t item, float out[4]);
-static int measure(uint64_t oi, uint64_t container, int a, int b, float out[4], int *approx, int *whole, float value[4]) {
+static int measure(uint64_t oi, uint64_t container, int a, int b, float out[4], int *approx, int *whole, float value[4],
+                   int *select_only) {
     const GetMemberFn get=(GetMemberFn)interface_original[5];
     const DisplayFn display=(DisplayFn)interface_original[28];
     GfxValue item, stage;
@@ -946,10 +950,15 @@ static int measure(uint64_t oi, uint64_t container, int a, int b, float out[4], 
     char name[24];
     snprintf(name,sizeof(name),"Item_%d_%d",a,b);
     int ok=0;
-    *approx=*whole=0;
+    *approx=*whole=*select_only=0;
     memset(value,0,4*sizeof(*value));
     if ((get(oi,container,name,&item,1)&0xFF) && (item.type&0x0F)==10) {
         if (!row_value(oi,item.value,value)) memset(value,0,4*sizeof(*value));
+        GfxValue children;
+        memset(&children,0,sizeof(children));
+        double count=0;
+        *select_only=(get(oi,item.value,"numChildren",&children,1)&0xFF) && number_of(&children,&count) && count==1;
+        value_release(&children);
         if ((get(oi,item.value,"stage",&stage,1)&0xFF) && ((stage.type&0x0F)==10 || (stage.type&0x0F)==8)) {
             GfxValue cursor;
             memset(&cursor,0,sizeof(cursor));
@@ -1084,8 +1093,9 @@ static void scan_container(uint64_t oi, uint64_t container, int probe_now, int m
         float r[4]={0,0,0,0};
         int approx=0, whole=0;
         float value[4];
+        int select_only=0;
         measuring=1;
-        const int ok=measure(oi,container,m.a,m.b,r,&approx,&whole,value);
+        const int ok=measure(oi,container,m.a,m.b,r,&approx,&whole,value,&select_only);
         measuring=0;
         host_lock(&menu_lock);
         MenuItem *t=&menu_items[index];
@@ -1093,6 +1103,8 @@ static void scan_container(uint64_t oi, uint64_t container, int probe_now, int m
             if (ok) { t->x0=r[0]; t->y0=r[1]; t->x1=r[2]; t->y1=r[3]; t->approx=approx; t->whole=whole; }
             else { t->x1=t->x0; t->y1=t->y0; t->approx=0; } /* never hit; tried again after BOUNDS_NS */
             t->value_x0=value[0]; t->value_x1=value[2];
+            if (select_only && !t->select_only) menu_note("Item_%d_%d is its cursor alone: a click selects it only",m.a,m.b);
+            t->select_only=select_only;
         }
         host_unlock(&menu_lock);
         menu_note("bounds Item_%d_%d %s (%.0f,%.0f)-(%.0f,%.0f)",m.a,m.b,!ok ? "failed" : approx ? "origin" : "ok",
@@ -1912,7 +1924,10 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
     else if (moved && hovered>=0 && hovered!=nav_target && hovered!=blocked) { nav_target=hovered; steps=visited_count=0; }
     last_hovered=hovered;
     if (hovered!=blocked) blocked=-1;
-    if ((pressed&1) && hovered>=0) { nav_target=confirm_target=hovered; steps=visited_count=0; }
+    if ((pressed&1) && hovered>=0) {
+        nav_target=hovered; steps=visited_count=0;
+        confirm_target=menu_items[hovered].select_only ? -1 : hovered;
+    }
     if (!pointable_item(nav_target,menu,now,by_focus)) nav_target=-1;
     if (!pointable_item(confirm_target,menu,now,by_focus)) confirm_target=-1;
     /* The list the target is in (the menu on top, or a live list beside it). */
