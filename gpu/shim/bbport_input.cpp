@@ -47,12 +47,18 @@ std::atomic<uint64_t> keys[(SDL_SCANCODE_COUNT + 63) / 64];
 std::atomic<uint32_t> mouse_buttons{0}; // bit (SDL button - 1)
 std::atomic<uint32_t> mouse_ignored{0}; // held when the capture began: ignored until released
 std::atomic<bool> captured{false}, released{false};
+std::atomic<bool> menu_active{false}; // runtime_menu.c: a menu takes the free mouse
+std::atomic<bool> warp_pending{false};
+std::atomic<float> warp_x{0.0f}, warp_y{0.0f}; // where the pointer starts in the menu (window points)
 std::mutex wheel_mutex;
 std::deque<uint32_t> wheel_queue; // controls of the wheel steps not pressed yet
 uint32_t wheel_held = 0;          // controls of the step being pressed
 Uint64 wheel_start = 0, wheel_free = 0;
 std::mutex motion_mutex;
 float motion_x = 0.0f, motion_y = 0.0f;
+std::atomic<uint32_t> probe_requests{0}, trace_requests{0}; // F7, F8: menu probe and trace (runtime_menu.c)
+std::atomic<float> pointer_x{0.0f}, pointer_y{0.0f};
+std::atomic<int> window_w{0}, window_h{0};
 
 std::once_flag parsed;
 std::vector<Binding> bindings[BBGPU_PAD_CONTROL_COUNT];
@@ -158,9 +164,13 @@ bool Down(int input) {
         break;
     }
     // The mouse acts in the game only while it is captured (a click that focuses the window,
-    // or one on the free cursor after F1, is not an attack).
+    // or one on the free cursor after F1, is not an attack). In a menu the left and right
+    // buttons point and click (runtime_menu.c); the others keep their bindings.
     if (!captured.load(std::memory_order_relaxed)) {
-        return false;
+        const int button = input - MouseBase + 1;
+        if (!menu_active.load(std::memory_order_relaxed) || button == SDL_BUTTON_LEFT || button == SDL_BUTTON_RIGHT) {
+            return false;
+        }
     }
     const uint32_t held = mouse_buttons.load(std::memory_order_relaxed) & ~mouse_ignored.load(std::memory_order_relaxed);
     return (held >> (input - MouseBase)) & 1;
@@ -226,6 +236,13 @@ void Observe(const SDL_Event& event) {
             released = now_released;
             std::printf("Input: mouse camera %s (F1)\n", now_released ? "released" : "captures the mouse again");
         }
+        if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
+            if (event.key.key == SDLK_F7) {
+                ++probe_requests;
+            } else if (event.key.key == SDLK_F8) {
+                ++trace_requests;
+            }
+        }
         break;
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP:
@@ -242,7 +259,7 @@ void Observe(const SDL_Event& event) {
     case SDL_EVENT_MOUSE_WHEEL: {
         // The step's control is decided now, with the modifiers held at this moment.
         const float y = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
-        if (y == 0.0f || !captured) {
+        if (y == 0.0f || !(captured || menu_active)) {
             break;
         }
         std::call_once(parsed, Parse);
@@ -255,6 +272,8 @@ void Observe(const SDL_Event& event) {
         break;
     }
     case SDL_EVENT_MOUSE_MOTION:
+        pointer_x = event.motion.x;
+        pointer_y = event.motion.y;
         if (captured) {
             std::scoped_lock lock{motion_mutex};
             motion_x += event.motion.xrel;
@@ -275,7 +294,11 @@ void Observe(const SDL_Event& event) {
 }
 
 void UpdateCapture(SDL_Window* window, bool text_entry) {
-    const bool want = BbSettings::Get().mouse_camera && !released && !text_entry &&
+    if (int w = 0, h = 0; SDL_GetWindowSize(window, &w, &h)) {
+        window_w = w;
+        window_h = h;
+    }
+    const bool want = BbSettings::Get().mouse_camera && !released && !text_entry && !menu_active &&
                       !BbOverlay::CapturesInput() && (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS);
     if (want == captured.load()) {
         return;
@@ -287,6 +310,9 @@ void UpdateCapture(SDL_Window* window, bool text_entry) {
     DropMotion();
     DropWheel();
     captured = want;
+    if (!want && warp_pending.exchange(false)) {
+        SDL_WarpMouseInWindow(window, warp_x, warp_y);
+    }
 }
 
 bool Captured() {
@@ -345,4 +371,25 @@ extern "C" void bbgpu_keyboard_mouse(BbGpuKeyboardMouse* state) {
     state->sensitivity = 0.001f * settings.mouse_sensitivity;
     state->invert_y = settings.mouse_invert_y ? 1 : 0;
     state->walk_scale = settings.walk_stick;
+    state->probe_requests = probe_requests;
+    state->trace_requests = trace_requests;
+    state->free_buttons = captured ? 0 : mouse_buttons.load();
+    state->pointer_x = pointer_x;
+    state->pointer_y = pointer_y;
+    state->window_w = window_w;
+    state->window_h = window_h;
+}
+
+extern "C" void bbgpu_menu_active(int active, float x, float y) {
+    using namespace BbInput;
+    if (active && x >= 0.0f && y >= 0.0f) {
+        warp_x = x;
+        warp_y = y;
+        pointer_x = x; // the pad thread sees it there at once (no motion: not a choice)
+        pointer_y = y;
+        warp_pending = true;
+    }
+    if (menu_active.exchange(active != 0) != (active != 0)) {
+        std::printf("Input: %s\n", active ? "a menu takes the mouse" : "the menu gave the mouse back");
+    }
 }

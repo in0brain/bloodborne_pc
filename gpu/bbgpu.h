@@ -51,9 +51,18 @@ typedef struct {
     float sensitivity;        /* camera radians per mouse count */
     int invert_y;
     float walk_scale;         /* left stick deflection of the movement keys while walking */
+    uint32_t probe_requests;  /* F7 presses so far (menu memory probe, runtime_menu.c) */
+    uint32_t trace_requests;  /* F8 presses so far (menu call trace, runtime_menu.c) */
+    float pointer_x, pointer_y; /* the free cursor in the window (points) */
+    int window_w, window_h;   /* the window's size (points) */
+    uint32_t free_buttons;    /* mouse buttons held while the mouse is free (bit SDL button - 1) */
 } BbGpuKeyboardMouse;
 /* Samples the keyboard and mouse bindings and takes the mouse motion (the pad thread). */
 void bbgpu_keyboard_mouse(BbGpuKeyboardMouse *state);
+/* The game shows a menu the mouse points into (runtime_menu.c): the window frees the mouse, and
+ * the wheel and the other mouse buttons keep their bindings; left and right go to the menu.
+ * x, y >= 0 (window points): the pointer is put there first, on the selected item. */
+void bbgpu_menu_active(int active, float x, float y);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned bbgpu_symbol_count(void);
 #ifdef __cplusplus

@@ -35,6 +35,8 @@ void runtime_mutex_report(void);
 uintptr_t runtime_memory_resolve(const char *name);
 void runtime_memory_report(void);
 int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
+typedef struct { uintptr_t start; uint64_t size; const unsigned char *data; int type; } RuntimeView;
+size_t runtime_memory_views(RuntimeView *out, size_t max);
 const char *runtime_import_name(const char *name);
 uintptr_t runtime_rwlock_resolve(const char *name);
 void runtime_rwlock_report(void);
@@ -56,6 +58,16 @@ void runtime_content_configure(const uint32_t values[5]);
  * pad thread then hands it the captured mouse's motion and whether the right stick is used. */
 void runtime_camera_configure(unsigned char *image, uint64_t size);
 void runtime_camera_update(float dx, float dy, int captured, float sensitivity, int invert_y, int stick_camera);
+/* Menu probe and trace (runtime_menu.c, BB_MENU_PROBE=1): F7 writes the game's live menu
+ * objects to logs/menu-probe-*.txt, F8 its next seconds of calls into Scaleform to
+ * logs/menu-trace-*.txt. The pad thread hands over the key presses so far, the free cursor's
+ * position in the window and the pad state it reports (buttons, left stick). */
+void runtime_menu_configure(unsigned char *image, uint64_t size);
+/* Returns the buttons the mouse adds in a menu (d-pad steps toward the pointed item, confirm,
+ * cancel). */
+uint32_t runtime_menu_update(unsigned probe_requests, unsigned trace_requests, float pointer_x, float pointer_y,
+                             int window_w, int window_h, uint32_t free_buttons, uint32_t buttons, uint8_t left_x,
+                             uint8_t left_y);
 uintptr_t runtime_content_resolve(const char *name);
 void runtime_content_report(void);
 typedef struct { const char *name; void *function; } RuntimeExport;

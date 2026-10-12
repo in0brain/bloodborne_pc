@@ -9,7 +9,8 @@
  *   Enter Options, Tab left touchpad, Backspace right touchpad,
  *   IJKL d-pad (I up, K down, J left, L right), LCtrl walk (WASD push the stick
  *   walk_stick far).
- * The captured mouse turns the camera (runtime_camera.c; F1 releases it). */
+ * The captured mouse turns the camera (runtime_camera.c; F1 releases it).
+ * F7 and F8 run the menu probe and trace (runtime_menu.c, BB_MENU_PROBE=1). */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "gpu/bbgpu.h"
@@ -127,6 +128,8 @@ static void keyboard_mouse(PadData *d) {
     key_stick(kbm.held,BBGPU_PAD_CAMERA_UP,&d->right_x,&d->right_y,1.0f);
     const int stick_camera=abs(d->right_x-128)>48 || abs(d->right_y-128)>48;
     runtime_camera_update(kbm.mouse_dx,kbm.mouse_dy,kbm.captured,kbm.sensitivity,kbm.invert_y,stick_camera);
+    d->buttons|=runtime_menu_update(kbm.probe_requests,kbm.trace_requests,kbm.pointer_x,kbm.pointer_y,kbm.window_w,
+                                    kbm.window_h,kbm.free_buttons,d->buttons,d->left_x,d->left_y);
 }
 static void sample_host(PadData *d) {
     memset(d,0,sizeof(*d));

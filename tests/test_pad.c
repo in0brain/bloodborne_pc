@@ -9,6 +9,16 @@ static BbGpuKeyboardMouse keyboard;
 static int camera_stick=-1;
 static float camera_dx;
 void bbgpu_keyboard_mouse(BbGpuKeyboardMouse *state) { *state=keyboard; keyboard.mouse_dx=keyboard.mouse_dy=0; }
+static unsigned menu_probes, menu_traces;
+static uint32_t menu_buttons;
+static uint32_t menu_adds;
+uint32_t runtime_menu_update(unsigned probe_requests, unsigned trace_requests, float pointer_x, float pointer_y,
+                             int window_w, int window_h, uint32_t free_buttons, uint32_t buttons, uint8_t left_x,
+                             uint8_t left_y) {
+    (void)pointer_x; (void)pointer_y; (void)window_w; (void)window_h; (void)free_buttons; (void)left_x; (void)left_y;
+    menu_probes=probe_requests; menu_traces=trace_requests; menu_buttons=buttons;
+    return menu_adds;
+}
 void runtime_camera_update(float dx, float dy, int captured, float sensitivity, int invert_y, int stick_camera) {
     (void)dy; (void)captured; (void)sensitivity; (void)invert_y;
     camera_dx=dx; camera_stick=stick_camera;
@@ -64,7 +74,17 @@ int main(void) {
     keyboard.held|=1u<<BBGPU_PAD_MOVE_RIGHT;
     assert(pad_read_state(1,&data)==0 && data.left_x==128+36 && data.left_y==128-36);
     memset(&keyboard,0,sizeof(keyboard));
-    assert(pad_read_state(1,&data)==0 && data.buttons==0 && data.right_x==128);
+    assert(pad_read_state(1,&data)==0 && data.buttons==0 && data.right_x==128 && menu_probes==0);
+    /* The menu probe and trace see the F7/F8 presses and the buttons the pad reports. */
+    keyboard.probe_requests=1;
+    keyboard.trace_requests=2;
+    keyboard.held=1u<<BBGPU_PAD_DPAD_DOWN;
+    assert(pad_read_state(1,&data)==0 && menu_probes==1 && menu_traces==2 && menu_buttons==BTN_DOWN);
+    keyboard.held=0;
+    /* The buttons the mouse adds in a menu reach the game. */
+    menu_adds=BTN_CIRCLE;
+    assert(pad_read_state(1,&data)==0 && (data.buttons & BTN_CIRCLE));
+    menu_adds=0;
 
     SDL_VirtualJoystickTouchpadDesc touch={.nfingers=2};
     SDL_VirtualJoystickDesc desc;

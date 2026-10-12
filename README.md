@@ -103,7 +103,9 @@ IJKL d-pad, Tab/Backspace touchpad left/right, Left Ctrl walk (`key_walk`: WASD 
 only `walk_stick` far, 0.40 by default). An input pressing a control another input already holds
 presses it again (a side button sprints, Space jumps), and each wheel step is one press.
 `mouse_camera`, `mouse_sensitivity`, `mouse_invert_y` and `walk_stick` are also in the in-game
-menu, as is borderless fullscreen (F11; kept in `bbport.ini` as `fullscreen`).
+menu, as is borderless fullscreen (F11; kept in `bbport.ini` as `fullscreen`). The free cursor
+(F1, the in-game menu) is the arrow in `assets/cursor` (`tools/make_cursor.py` builds `arrow.png`
+from the source art), scaled to the window.
 
 **Confirm button:** Japanese, Asian and Korean dumps (CONTENT_ID JP, HP or KP) act and confirm
 with Circle and dodge with Cross, as on their consoles; `enter_button=auto` in `bbport.ini` (the
@@ -217,6 +219,11 @@ pass), `BB_FSR4_PROFILE=1` (GPU time per FSR 4 pass), `BB_UPSCALER=taa|fsr3|fsr4
 0 = unbounded), `BB_PRESENT_THREAD=0` (present on the vblank thread, as before),
 `BB_LIVE_RES=1` (live resolution changes instead of the startup patch for outputs other than 1080p),
 `BB_PAD_RECORD=file` / `BB_PAD_REPLAY=file` (record a route with F9, replay it in scripted tests),
+`BB_MENU_PROBE=1` (the mouse in menus, a prototype: a menu frees the mouse, pointing at an item
+selects it, in one jump in the game's lists, the left button confirms, the right one cancels; F7
+writes the game's live menu objects to `logs/menu-probe-*.txt`, F8 its next 4 seconds of calls into
+Scaleform, with the game functions that made them, to `logs/menu-trace-*.txt`),
+`BB_ASSETS_DIR=dir` (another `assets` folder),
 `BB_GC_BUDGET_MB=N` (texture cache budget, as on integrated GPUs), `BB_PRESENT_DUMP_TRIGGER=file`
 with `BB_PRESENT_DUMP_COUNT=N` (dump N consecutive presented frames).
 More in [docs/](docs); recent changes: [docs/CHANGES_2026-10-02.md](docs/CHANGES_2026-10-02.md),
