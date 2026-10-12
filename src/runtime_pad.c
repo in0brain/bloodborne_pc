@@ -139,6 +139,12 @@ static void sample_host(PadData *d) {
     d->timestamp=now_us();
     SDL_Gamepad *g=current_gamepad();
     if (bbgpu_overlay_captures_input()) return; /* settings menu open: neutral input */
+    /* The game's text dialog open: neutral input, as on the console, where the dialog has the
+     * pad; then until every button is up (the press that confirmed the text is no new one). A
+     * text field's row queues a dialog for each confirm press, four at most: a fifth, a click
+     * or a key while one is open, stopped the game ("out of memory"). */
+    static int ime_held;
+    if (runtime_ime_active()) { ime_held=1; return; }
     if (g) {
         static const struct { SDL_GamepadButton sdl; uint32_t ps; } map[]={
             {SDL_GAMEPAD_BUTTON_SOUTH,BTN_CROSS}, {SDL_GAMEPAD_BUTTON_EAST,BTN_CIRCLE},
@@ -171,6 +177,10 @@ static void sample_host(PadData *d) {
         if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
     }
     keyboard_mouse(d);
+    if (ime_held && (d->buttons || d->l2 || d->r2)) {
+        d->buttons=0; d->l2=d->r2=0; d->touch_count=0;
+        d->left_x=d->left_y=d->right_x=d->right_y=128;
+    } else ime_held=0;
 }
 
 /* BB_PAD_FILE=<file>: scripted input for automated runs. The file holds whitespace-separated

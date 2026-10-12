@@ -241,6 +241,8 @@ constexpr Pair kRussian[] = {
      "Только при выводе 1920 x 1080 (просмотр маски — часть этого пути)."},
     {"Menu language",
      "Язык меню"},
+    {"Enter: OK    Esc: cancel    The system input method types here too",
+     "Enter: OK    Esc: отмена    Системный способ ввода тоже печатает здесь"},
     {"The language of this menu. The game's own language is set by the launcher "
      "(BB_LANGUAGE).",
      "Язык этого меню. Язык самой игры задаёт лаунчер (BB_LANGUAGE)."},

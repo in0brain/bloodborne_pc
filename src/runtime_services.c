@@ -285,6 +285,7 @@ static ABI int32_t ime_result(uint32_t *result) {
     return 0;
 }
 static ABI int32_t ime_term(void) { memset(&ime,0,sizeof(ime)); return 0; }
+int runtime_ime_active(void) { return __atomic_load_n(&ime.running,__ATOMIC_RELAXED); }
 
 /* ---- Trophies: accepted locally, recorded in the log ---- */
 static ABI int32_t trophy_context(int32_t *ctx,int32_t user,uint32_t label,uint64_t options) {

@@ -229,8 +229,8 @@ ANSI_COLOR = re.compile(rb'\x1b\[[0-9;]*m')
 
 def run_logged(command, logs):
     """Windows: bb-probe's output (unbuffered stdout and stderr) goes to the console and to
-    logs/bbport-<time>.log in the data folder, each line there with the time of day (to set beside
-    tools/monitor_windows.ps1's samples); the newest LOGS_KEPT logs are kept."""
+    logs/bbport-<time>.log in the data folder, each line there with the time of day; the newest
+    LOGS_KEPT logs are kept."""
     try:
         os.makedirs(logs, exist_ok=True)
         old = sorted(glob.glob(os.path.join(logs, 'bbport-*.log')))

@@ -632,7 +632,8 @@ static void trace_finish(void) {
  * top left corner, each waiting for the selection to move (a selection unknown yet is revealed
  * by one press; one that comes back to an item already passed gives up: a list too short, an
  * empty row); the left button confirms, the right one cancels. Menu movies are 1920x1080
- * stages over the window.
+ * stages over the game's picture, letterboxed in the window as the presenter fits it: positions
+ * are stage units at any resolution.
  *
  * Most menus are the game's list widget: a grid of those clips showing a scrolled run of entries,
  * the selection kept in the widget. A hook at the start of its per-frame update (every list type
@@ -641,8 +642,15 @@ static void trace_finish(void) {
  * the hook calls the widget's SetSelection, then tells its listener (the dialog: description,
  * help text) and requests the cursor sound, as the update does after a key press. A list the game
  * stops updating has lost the focus (a screen over it, like the equipment slots over the in-game
- * menu): the mouse stays free, but its items take nothing. Menus without a list widget take d-pad
- * steps as above. */
+ * menu): the mouse stays free, but its items take nothing. An options screen shows each row's
+ * value beside the row's name, as a list of one clip or as a slider (a gauge between two arrows,
+ * hooked at its update as well), a dropdown or a text field: pointing at a value selects its row
+ * (a click on a dropdown's or a text field's confirms it, as on the row's name); a click on a list's half
+ * presses left or right (the game steps it, around the ends: a switch toggles at every click), one
+ * on a slider's arrow steps it and one on its bar (or a drag along it) sets it (its SetValue: the
+ * game applies and sounds it). A box's spinner (a quantity: a shop's) is hooked at its update too:
+ * a click above its number's middle presses up, below it down. Menus without a list widget take
+ * d-pad steps as above. */
 #define MAX_ITEMS 256
 #define MAX_CONTAINERS 16
 #define STAGE_W 1920.0f
@@ -688,25 +696,70 @@ static void trace_finish(void) {
 #define CURSOR_SOUND 0x49344E4u       /* "カーソル移動" (cursor move), UTF-8 */
 #define LIST_LIVE_NS UINT64_C(250000000) /* a list updated this lately has the focus */
 #define CONFIRM_NS UINT64_C(40000000)    /* a jump's selection settles this long before the confirm press */
-#define MAX_LIST_NOTES 64
+#define MAX_LIST_NOTES 512
 static const uint8_t list_update_code[26]={0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,
                                            0x48,0x81,0xEC,0x98,0x00,0x00,0x00,0x49,0x89,0xF7,0x49,0x89,0xFD};
 static const uint8_t list_set_selection_code[26]={0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,
                                                   0x48,0x81,0xEC,0xE8,0x00,0x00,0x00,0x41,0x89,0xF6,0x49,0x89,0xFC};
 static const char cursor_sound[]="\xE3\x82\xAB\xE3\x83\xBC\xE3\x82\xBD\xE3\x83\xAB\xE7\xA7\xBB\xE5\x8B\x95";
-/* The hook's code: the arguments kept around list_update(list, input), the replaced prologue, back. */
-static const uint8_t list_trampoline[]={
+/* The slider (v1.09): an options row's gauge, the clips "Bar", "LeftArrow" and "RightArrow"
+ * under the row's, each in a holder (vtable CLIP_HOLDER): a value wrapper at +0x28, its
+ * GFx::Value at +0x30 (the holder's getter, 0x1ADB830, reads the interface, type and clip). */
+#define SLIDER_UPDATE 0x1ADC970u      /* update(slider, input): every frame for every row, the input on in the selected one's */
+#define SLIDER_SET_VALUE 0x1ADCAA0u   /* SetValue(slider, value, notify, sound id, sound name): clamps, shows, tells, sounds */
+#define SLIDER_PROLOGUE 16            /* push rbp ... mov rbx,rdi */
+#define CLIP_HOLDER 0x539A070u
+#define SLIDER_BAR 0xA70              /* the holders */
+#define SLIDER_LEFT 0xB30
+#define SLIDER_RIGHT 0xB90
+#define HOLDER_OI 0x40
+#define HOLDER_TYPE 0x48
+#define HOLDER_CLIP 0x50
+#define SLIDER_MIN 0xBF0              /* ints */
+#define SLIDER_MAX 0xBF4
+#define SLIDER_VALUE 0xBF8
+#define SLIDER_STEP 0xBFC
+#define SLIDER_SOUND 0x493387Bu       /* "スライダー調整" (slider adjustment), UTF-8, with sound id 0x190 as the update passes */
+#define SLIDER_SOUND_ID 0x190
+/* The spinner (v1.09): a quantity to choose, a shop's or an item's, the number "Text_1" between an
+ * up and a down arrow (unnamed clips just above and below it: itemquantityselect.gfx, numselect.gfx).
+ * Built by 0x1B56750 at +0x1F20 of its box (vtable 0x539C8A0), its number's holder at +0x10. */
+#define SPINNER_UPDATE 0x1ADD210u     /* update(spinner, input): up and down step it (around the ends) */
+#define SPINNER_PROLOGUE 16           /* push rbp ... mov rbx,rsi */
+#define SPINNER_VTABLE 0x539A100u
+#define SPINNER_NUMBER 0x10           /* the holder of "Text_1" */
+#define SPINNER_MIN 0x70              /* ints */
+#define SPINNER_MAX 0x74
+#define SPINNER_VALUE 0x78
+#define SPINNER_STEP 0x7C
+#define SPINNER_REACH_X 40.0f         /* its arrows' area: this far either side of the number's middle, */
+#define SPINNER_REACH_Y 28.0f         /* and above and below the number (the arrows 10 px off it, 11 high) */
+static const uint8_t spinner_update_code[26]={0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x53,0x48,0x83,0xEC,0x28,
+                                              0x48,0x89,0xF3,0x49,0x89,0xFE,0x4C,0x8B,0x3D,0xB6,0x69,0x90,0x03};
+static const uint8_t slider_update_code[26]={0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x53,0x50,0x49,0x89,0xF6,
+                                             0x48,0x89,0xFB,0x44,0x8B,0xBB,0xF8,0x0B,0x00,0x00,0x4C,0x89,0xF7};
+static const uint8_t slider_set_value_code[16]={0x55,0x48,0x89,0xE5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,
+                                                0x48,0x83,0xEC};
+static const char slider_sound[]="\xE3\x82\xB9\xE3\x83\xA9\xE3\x82\xA4\xE3\x83\x80\xE3\x83\xBC\xE8\xAA\xBF\xE6\x95\xB4";
+/* A hook's code: the arguments kept around hook(rdi, rsi), the replaced prologue (NOPs after a
+ * shorter one), back. */
+static const uint8_t hook_trampoline[]={
     0x57, 0x56, 0x48,0x83,0xEC,0x08,                   /*  0 push rdi; push rsi; sub rsp,8 */
-    0x48,0xB8,0,0,0,0,0,0,0,0, 0xFF,0xD0,              /*  6 mov rax,list_update; call rax */
+    0x48,0xB8,0,0,0,0,0,0,0,0, 0xFF,0xD0,              /*  6 mov rax,hook; call rax */
     0x48,0x83,0xC4,0x08, 0x5E, 0x5F,                   /* 18 add rsp,8; pop rsi; pop rdi */
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,            /* 24 the prologue */
     0xFF,0x25,0x00,0x00,0x00,0x00,                     /* 44 jmp [rip+0]; after the prologue */
 };
 #define TRAMPOLINE_HOOK 8
 #define TRAMPOLINE_PROLOGUE 24
+#define TRAMPOLINE_SLOT 20
 #define TRAMPOLINE_BACK 50
-#define TRAMPOLINE_AT 1024            /* in the trace's code page */
-_Static_assert(sizeof(list_trampoline)==TRAMPOLINE_BACK && TRAMPOLINE_PROLOGUE+LIST_PROLOGUE==44,"list hook code");
+#define TRAMPOLINE_SIZE 64
+#define TRAMPOLINE_AT 1024            /* in the trace's code page: the list's, the slider's, the spinner's */
+_Static_assert(sizeof(hook_trampoline)==TRAMPOLINE_BACK && TRAMPOLINE_PROLOGUE+TRAMPOLINE_SLOT==44 &&
+               LIST_PROLOGUE<=TRAMPOLINE_SLOT && SLIDER_PROLOGUE<=TRAMPOLINE_SLOT && SPINNER_PROLOGUE<=TRAMPOLINE_SLOT &&
+               TRAMPOLINE_BACK+8<=TRAMPOLINE_SIZE,
+               "hook code");
 
 /* GFx::Value (0x30 bytes): a managed value (type bit 0x40) is linked into its movie's list
  * (next, prev) until released, so every one returned to us is released before it goes. */
@@ -724,6 +777,14 @@ typedef struct {
     float x0, y0, x1, y1;      /* stage bounds, valid with bounds_ns; a point when approx */
     uint64_t bounds_ns, seen_ns;
     int approx;                /* from display info: the item's origin only */
+    int whole;                 /* the item's bounds, not its cursor's (hidden text may widen them) */
+    float value_x0, value_x1;  /* an options row's value beside its name that stands for the row (a
+                                * dropdown's current item, a text field); none where x1 <= x0 */
+    int select_only;           /* the row is its Cursor alone, a highlight over what is drawn elsewhere
+                                * (levelup.gfx's attributes, iconhelp.gfx): a click selects it and
+                                * confirms nothing (a level-up's confirm asks to level up) */
+    float step_x0, step_x1;    /* such a row's number beside it (a level-up's attribute's Value_0): a
+                                * click on its left half presses left, on its right half right */
     int absent;                /* a list's clip that shows no entry (a dialog's second button, rows past the end) */
 } MenuItem;
 /* active_ns: when its selection last moved or its items were first found (the newest is on top:
@@ -745,6 +806,22 @@ typedef struct {
 typedef struct { int count, selected, columns, rows, first_column, first_row, wraps; } ListState;
 /* Pad thread -> list hook: select the entry under Item_<jump_a>_<jump_b> of jump_list. */
 enum { JUMP_IDLE, JUMP_POSTED, JUMP_TAKEN, JUMP_DONE };
+/* A control, learnt on its update: an options row's slider (its arrows and bar) or list of one clip
+ * (its arrows, LeftItem_0 and RightItem_0, or its clip's halves), a box's spinner (above and below
+ * its number). PART_LEFT steps back (left; a spinner's down), PART_RIGHT on (right; up). */
+enum { CONTROL_SLIDER=1, CONTROL_VALUES, CONTROL_SPINNER };
+enum { PART_LEFT, PART_RIGHT, PART_BAR, PARTS };
+typedef struct {
+    uint64_t object, container; /* the slider or the list; the list's container */
+    int kind, focused;          /* focused: its row is the selected one (updated with the input on) */
+    int min, max, value, step;  /* a slider's */
+    float part[PARTS][4];       /* stage bounds; none where x1 <= x0 */
+    uint64_t seen_ns, bounds_ns;
+} Control;
+#define MAX_CONTROLS 16
+#define ACTION_NS UINT64_C(500000000)  /* a click on a control waits this long for its row to be selected */
+#define ARROW_MARGIN 8.0f               /* an arrow takes clicks this far beyond its glyph */
+#define VALUE_REACH 24.0f               /* a value without the widget's arrows: its halves reach this far out */
 
 static int menu_mouse;
 static HostMutex menu_lock=HOST_MUTEX_INIT;
@@ -766,6 +843,18 @@ static int jump_state=JUMP_IDLE, jump_a, jump_b, jump_target=-1, jump_moved;
 static uint64_t jump_list, jump_ns;
 static uint64_t noted_lists[MAX_LIST_NOTES];
 static int listable;                 /* the list hook is in */
+/* The slider hook and the controls (under menu_lock): pad thread -> slider hook, set slider_target
+ * to slider_value (slider_value steps from its value when slider_relative). */
+static Control controls[MAX_CONTROLS];
+static int slider_state=JUMP_IDLE, slider_value, slider_relative, slidable;
+static uint64_t slider_target, slider_ns;
+/* Pad thread: a click on a control, applied once its row is selected; a drag along a bar. */
+static int action_control=-1, action_part, action_value, dragging;
+/* Pad thread: a click on a cursor-only row's number: its row, then the d-pad button, once selected. */
+static int step_item=-1;
+static uint32_t step_button;
+static uint64_t step_ns;
+static uint64_t action_object, action_ns;
 
 static void menu_note(const char *format, ...) __attribute__((format(printf,1,2)));
 static void menu_note(const char *format, ...) {
@@ -809,7 +898,7 @@ static int item_index(uint64_t container, int a, int b) {
 static int item_add(uint64_t oi, uint64_t container, int a, int b, uint64_t now) {
     const int i=item_index(container,a,b);
     MenuItem *m=&menu_items[i];
-    if (m->container!=container || m->a!=a || m->b!=b) *m=(MenuItem){oi,container,0,0,a,b,0,0,0,0,0,now,0,0};
+    if (m->container!=container || m->a!=a || m->b!=b) *m=(MenuItem){.oi=oi,.container=container,.a=a,.b=b,.seen_ns=now};
     m->seen_ns=now;
     return i;
 }
@@ -854,9 +943,13 @@ static int bounds_of(uint64_t oi, uint64_t clip, const GfxValue *stage, float ou
 }
 /* An item's bounds on the stage, through the interface's originals (not traced). The container is
  * alive (the game is calling it), so the item is fetched from it afresh and never kept: menus
- * rebuild their clips. getBounds(stage) where the interface reaches AS3 properties; else the
- * item's and the container's display info (x, y, scale) give the item's origin (*approx). */
-static int measure(uint64_t oi, uint64_t container, int a, int b, float out[4], int *approx) {
+ * rebuild their clips. getBounds(stage) where the interface reaches AS3 properties: the cursor's,
+ * else the item's (*whole); else the item's and the container's display info (x, y, scale) give
+ * the item's origin (*approx). An options row's value too (row_value; value[2] <= value[0]: none). */
+static int row_value(uint64_t oi, uint64_t item, float out[4]);
+static int row_number(uint64_t oi, uint64_t container, const float row[4], float out[4]);
+static int measure(uint64_t oi, uint64_t container, int a, int b, float out[4], int *approx, int *whole, float value[4],
+                   int *select_only, float number[4]) {
     const GetMemberFn get=(GetMemberFn)interface_original[5];
     const DisplayFn display=(DisplayFn)interface_original[28];
     GfxValue item, stage;
@@ -864,15 +957,23 @@ static int measure(uint64_t oi, uint64_t container, int a, int b, float out[4], 
     char name[24];
     snprintf(name,sizeof(name),"Item_%d_%d",a,b);
     int ok=0;
-    *approx=0;
+    *approx=*whole=*select_only=0;
+    memset(value,0,4*sizeof(*value));
+    memset(number,0,4*sizeof(*number));
     if ((get(oi,container,name,&item,1)&0xFF) && (item.type&0x0F)==10) {
+        if (!row_value(oi,item.value,value)) memset(value,0,4*sizeof(*value));
+        GfxValue children;
+        memset(&children,0,sizeof(children));
+        double count=0;
+        *select_only=(get(oi,item.value,"numChildren",&children,1)&0xFF) && number_of(&children,&count) && count==1;
+        value_release(&children);
         if ((get(oi,item.value,"stage",&stage,1)&0xFF) && ((stage.type&0x0F)==10 || (stage.type&0x0F)==8)) {
             GfxValue cursor;
             memset(&cursor,0,sizeof(cursor));
             if ((get(oi,item.value,"Cursor",&cursor,1)&0xFF) && (cursor.type&0x0F)==10)
                 ok=bounds_of(oi,cursor.value,&stage,out) && out[2]-out[0]>4 && out[3]-out[1]>4;
             value_release(&cursor);
-            if (!ok) ok=bounds_of(oi,item.value,&stage,out);
+            if (!ok) ok=*whole=bounds_of(oi,item.value,&stage,out);
         }
         if (!ok) {
             double di[64], ci[64]; /* DisplayInfo: x, y, rotation, xscale, yscale (percent), alpha, ... */
@@ -888,6 +989,7 @@ static int measure(uint64_t oi, uint64_t container, int a, int b, float out[4], 
     }
     value_release(&stage);
     value_release(&item);
+    if (ok && !*approx && *select_only && !row_number(oi,container,out,number)) memset(number,0,4*sizeof(*number));
     return ok;
 }
 /* The container's Item_<a>_<b> clips that have a cursor, fetched afresh (the container is alive:
@@ -998,15 +1100,21 @@ static void scan_container(uint64_t oi, uint64_t container, int probe_now, int m
         if (index<0) break;
         ++n;
         float r[4]={0,0,0,0};
-        int approx=0;
+        int approx=0, whole=0;
+        float value[4], number[4];
+        int select_only=0;
         measuring=1;
-        const int ok=measure(oi,container,m.a,m.b,r,&approx);
+        const int ok=measure(oi,container,m.a,m.b,r,&approx,&whole,value,&select_only,number);
         measuring=0;
         host_lock(&menu_lock);
         MenuItem *t=&menu_items[index];
         if (t->container==container && t->a==m.a && t->b==m.b) {
-            if (ok) { t->x0=r[0]; t->y0=r[1]; t->x1=r[2]; t->y1=r[3]; t->approx=approx; }
+            if (ok) { t->x0=r[0]; t->y0=r[1]; t->x1=r[2]; t->y1=r[3]; t->approx=approx; t->whole=whole; }
             else { t->x1=t->x0; t->y1=t->y0; t->approx=0; } /* never hit; tried again after BOUNDS_NS */
+            t->value_x0=value[0]; t->value_x1=value[2];
+            if (select_only && !t->select_only) menu_note("Item_%d_%d is its cursor alone: a click selects it only",m.a,m.b);
+            t->select_only=select_only;
+            t->step_x0=number[0]; t->step_x1=number[2];
         }
         host_unlock(&menu_lock);
         menu_note("bounds Item_%d_%d %s (%.0f,%.0f)-(%.0f,%.0f)",m.a,m.b,!ok ? "failed" : approx ? "origin" : "ok",
@@ -1022,43 +1130,55 @@ static int pointable(const MenuItem *m, uint64_t container) {
     return m->container==container && m->cursor && m->bounds_ns && !m->absent;
 }
 /* The spacing of a container's measured items: the smallest gap between top left corners along a
- * row (x) and along a column (y); 0 where they do not spread. */
-static void pitches(uint64_t container, int approx, float *pitch_x, float *pitch_y) {
-    *pitch_x=*pitch_y=0;
+ * row (x) and along a column (y), 0 where they do not spread; and the glow, how far the smallest
+ * cursor reaches past a pitch on each side. */
+typedef struct { float pitch[2], glow[2]; } Spacing;
+static Spacing spacing(uint64_t container, int approx) {
+    Spacing g={{0,0},{0,0}};
+    float least[2]={0,0};
     for (int i=0;i<menu_item_count;++i) {
         const MenuItem *m=&menu_items[i];
         if (!pointable(m,container) || m->approx!=approx || (!approx && m->x1<=m->x0)) continue;
+        const float size[2]={m->x1-m->x0,m->y1-m->y0};
+        for (int k=0;k<2;++k) if (!m->whole && (!least[k] || size[k]<least[k])) least[k]=size[k];
         for (int j=i+1;j<menu_item_count;++j) {
             const MenuItem *n=&menu_items[j];
             if (!pointable(n,container) || n->approx!=approx || (!approx && n->x1<=n->x0)) continue;
             const float dx=m->x0>n->x0 ? m->x0-n->x0 : n->x0-m->x0, dy=m->y0>n->y0 ? m->y0-n->y0 : n->y0-m->y0;
-            if (dx>2 && dy<=8 && (!*pitch_x || dx<*pitch_x)) *pitch_x=dx;
-            if (dy>2 && dx<=8 && (!*pitch_y || dy<*pitch_y)) *pitch_y=dy;
+            if (dx>2 && dy<=8 && (!g.pitch[0] || dx<g.pitch[0])) g.pitch[0]=dx;
+            if (dy>2 && dx<=8 && (!g.pitch[1] || dy<g.pitch[1])) g.pitch[1]=dy;
         }
     }
+    for (int k=0;k<2;++k) if (g.pitch[k] && least[k]>g.pitch[k]) g.glow[k]=(least[k]-g.pitch[k])/2;
+    return g;
 }
-/* An item's area to point at: its bounds, but no further than one pitch from its top left corner
- * (bounds can swell with hidden text or the selected item's description panel). */
-static void hit_rect(const MenuItem *m, float pitch_x, float pitch_y, float r[4]) {
-    r[0]=m->x0; r[1]=m->y0;
-    r[2]=pitch_x && m->x1>m->x0+pitch_x ? m->x0+pitch_x : m->x1;
-    r[3]=pitch_y && m->y1>m->y0+pitch_y ? m->y0+pitch_y : m->y1;
+/* An item's area to point at: its bounds, but no more than one pitch across. Cursors' bounds hold
+ * their glow (a 108 px band over rows 56 px apart, 710 px over buttons 162 px apart), as much on
+ * each side of what they highlight: the pitch starts that far in. A bigger cursor (a description
+ * panel) or an item's own bounds (hidden text) swell down and right. */
+static void hit_rect(const MenuItem *m, const Spacing *g, float r[4]) {
+    const float lo[2]={m->x0,m->y0}, hi[2]={m->x1,m->y1};
+    for (int k=0;k<2;++k) {
+        r[k]=lo[k]; r[k+2]=hi[k];
+        if (!g->pitch[k] || hi[k]-lo[k]<=g->pitch[k]) continue;
+        if (!m->whole) r[k]+=g->glow[k];
+        r[k+2]=r[k]+g->pitch[k];
+    }
 }
 static int hit(uint64_t container, float sx, float sy) {
     int found=-1, approx=0;
     float best=0, pitch_x=0, pitch_y=0;
-    pitches(container,0,&pitch_x,&pitch_y);
+    const Spacing g=spacing(container,0);
     for (int i=0;i<menu_item_count;++i) {
         const MenuItem *m=&menu_items[i];
         if (!pointable(m,container)) continue;
         if (m->approx) { approx=1; continue; }
         float r[4];
-        hit_rect(m,pitch_x,pitch_y,r);
+        hit_rect(m,&g,r);
         const float area=(r[2]-r[0])*(r[3]-r[1]);
         if (r[2]>r[0] && sx>=r[0] && sx<r[2] && sy>=r[1] && sy<r[3] && (found<0 || area<best)) { found=i; best=area; }
     }
     if (found>=0 || !approx) return found;
-    pitch_x=pitch_y=0;
     for (int i=0;i<menu_item_count;++i) {
         const MenuItem *m=&menu_items[i];
         if (!pointable(m,container) || !m->approx) continue;
@@ -1084,6 +1204,77 @@ static int hit(uint64_t container, float sx, float sy) {
         if (found<0 || ex*ex+ey*ey<best) { found=i; best=ex*ex+ey*ey; }
     }
     return found;
+}
+/* A list showing one clip: an options row's value (on/off, a region), a list of its own beside
+ * the row's name, with its own highlight and arrows. */
+static int one_clip(const MenuContainer *c) {
+    return c && c->list && c->list_rows<=1 && c->list_columns<=1;
+}
+/* A control's part on the stage; 0 for none. A list of one clip without the widget's arrows (an
+ * options value draws its own in its highlight) is split at its clip's middle: the left half
+ * steps back, the right half on. */
+static int control_part(const Control *c, int k, float r[4]) {
+    memcpy(r,c->part[k],sizeof(c->part[k]));
+    if (r[2]>r[0] || c->kind!=CONTROL_VALUES || k==PART_BAR || c->part[!k][2]>c->part[!k][0]) return r[2]>r[0];
+    for (int i=0;i<menu_item_count;++i) {
+        const MenuItem *m=&menu_items[i];
+        if (!pointable(m,c->container) || m->approx || m->x1<=m->x0) continue;
+        const float mid=(m->x0+m->x1)/2;
+        r[0]=k==PART_LEFT ? m->x0-VALUE_REACH : mid;
+        r[2]=k==PART_LEFT ? mid : m->x1+VALUE_REACH;
+        r[1]=m->y0; r[3]=m->y1;
+        return 1;
+    }
+    return 0;
+}
+/* The row of a one-column list whose value the pointer is on: in the band of the row at the
+ * pointer's height, within the clip of a value the game updates beside the rows (the selected
+ * row's at least; the others may stand still). -1 elsewhere. */
+static int value_row(const MenuContainer *rows, float sx, float sy, uint64_t now) {
+    if (!rows->list || one_clip(rows) || rows->list_columns>1) return -1;
+    float top=0, bottom=0, height=0;
+    int row=-1, bands=0;
+    const Spacing g=spacing(rows->container,0);
+    for (int i=0;i<menu_item_count;++i) {
+        const MenuItem *m=&menu_items[i];
+        if (!pointable(m,rows->container) || m->approx) continue;
+        float r[4];
+        hit_rect(m,&g,r);
+        if (!bands++ || r[1]<top) top=r[1];
+        if (bands==1 || r[3]>bottom) bottom=r[3];
+        if (sy>=r[1] && sy<r[3] && (row<0 || r[3]-r[1]<height)) { row=i; height=r[3]-r[1]; }
+    }
+    if (row<0) return -1;
+    /* Its own value (a dropdown's current item: a click opens the list, as one on its name). */
+    if (menu_items[row].value_x1>menu_items[row].value_x0 && sx>=menu_items[row].value_x0-ARROW_MARGIN &&
+        sx<menu_items[row].value_x1+ARROW_MARGIN)
+        return row;
+    for (int c=0;c<MAX_CONTAINERS;++c) {
+        const MenuContainer *v=&containers[c];
+        if (v==rows || !one_clip(v) || now-v->list_ns>=LIST_LIVE_NS) continue;
+        for (int i=0;i<menu_item_count;++i) {
+            const MenuItem *m=&menu_items[i];
+            if (!pointable(m,v->container) || m->approx || (m->y0+m->y1)/2<top || (m->y0+m->y1)/2>=bottom) continue;
+            if (sx>=m->x0 && sx<m->x1) return row;
+        }
+    }
+    /* A control's span: from its left arrow to its right one (a slider's bar between them). */
+    for (int i=0;i<MAX_CONTROLS;++i) {
+        const Control *c=&controls[i];
+        float x0=0, x1=0, y0=0, y1=0;
+        int parts=0;
+        for (int k=0;k<PARTS && c->object && now-c->seen_ns<LIST_LIVE_NS;++k) {
+            float r[4];
+            if (!control_part(c,k,r)) continue;
+            if (!parts++) { x0=r[0]; y0=r[1]; x1=r[2]; y1=r[3]; continue; }
+            if (r[0]<x0) x0=r[0];
+            if (r[1]<y0) y0=r[1];
+            if (r[2]>x1) x1=r[2];
+            if (r[3]>y1) y1=r[3];
+        }
+        if (parts && (y0+y1)/2>=top && (y0+y1)/2<bottom && sx>=x0-ARROW_MARGIN && sx<x1+ARROW_MARGIN) return row;
+    }
+    return -1;
 }
 /* The direction from one item to another by their names: Item_<row>_<column> in every menu seen
  * (title, in-game menu, lists, options), rows down, columns right. Their bounds would mislead:
@@ -1178,6 +1369,306 @@ static int list_read(uint64_t list, uint64_t input, uint64_t *oi, uint64_t *cont
     runtime_fault_recover=previous;
     return ok;
 }
+/* ---- Options rows' controls ---- */
+static Control *control_of(uint64_t object, int add) {
+    Control *oldest=&controls[0];
+    for (int i=0;i<MAX_CONTROLS;++i) {
+        if (controls[i].object==object) return &controls[i];
+        if (controls[i].seen_ns<oldest->seen_ns) oldest=&controls[i];
+    }
+    if (!add) return NULL;
+    *oldest=(Control){.object=object};
+    return oldest;
+}
+/* A clip's bounds on the stage, the stage fetched from the clip (the game's thread, measuring). */
+static int stage_bounds(uint64_t oi, uint64_t clip, float out[4]) {
+    const GetMemberFn get=(GetMemberFn)interface_original[5];
+    GfxValue stage;
+    memset(&stage,0,sizeof(stage));
+    const int ok=(get(oi,clip,"stage",&stage,1)&0xFF) && ((stage.type&0x0F)==10 || (stage.type&0x0F)==8) &&
+                 bounds_of(oi,clip,&stage,out);
+    value_release(&stage);
+    return ok;
+}
+/* A container's child clip's bounds on the stage. */
+static int child_bounds(uint64_t oi, uint64_t container, const char *name, float out[4]) {
+    const GetMemberFn get=(GetMemberFn)interface_original[5];
+    GfxValue child;
+    memset(&child,0,sizeof(child));
+    const int ok=(get(oi,container,name,&child,1)&0xFF) && (child.type&0x0F)==10 && stage_bounds(oi,child.value,out);
+    value_release(&child);
+    return ok;
+}
+/* A clip's visible flag (true when it cannot be read). */
+static int clip_visible(uint64_t oi, uint64_t clip) {
+    const GetMemberFn get=(GetMemberFn)interface_original[5];
+    GfxValue visible;
+    memset(&visible,0,sizeof(visible));
+    const int read=(get(oi,clip,"visible",&visible,1)&0xFF) && (visible.type&0x0F)==2; /* a Boolean */
+    const int shown=!read || (visible.value&0xFF)!=0;
+    value_release(&visible);
+    return shown;
+}
+/* An options row's value beside its name when it stands for the row: a dropdown's current item
+ * (a click opens the list) or a text field (a click opens the text dialog). In optionsetting.gfx
+ * a row's "Widgets" holds a TextInput, a ComboBox (a list of one clip), a Slider and a
+ * DropdownList, the row's own shown; the ComboBox and the Slider are controls of their own. */
+static int row_value(uint64_t oi, uint64_t item, float out[4]) {
+    static const char *const kinds[][2]={{"DropdownList","CurrentItem"},{"TextInput","Text_0"}};
+    const GetMemberFn get=(GetMemberFn)interface_original[5];
+    GfxValue widgets;
+    memset(&widgets,0,sizeof(widgets));
+    int ok=0;
+    if ((get(oi,item,"Widgets",&widgets,1)&0xFF) && (widgets.type&0x0F)==10)
+        for (size_t k=0;k<sizeof(kinds)/sizeof(*kinds) && !ok;++k) {
+            GfxValue widget;
+            memset(&widget,0,sizeof(widget));
+            if ((get(oi,widgets.value,kinds[k][0],&widget,1)&0xFF) && (widget.type&0x0F)==10 && clip_visible(oi,widget.value))
+                ok=child_bounds(oi,widget.value,kinds[k][1],out) && out[2]-out[0]>4;
+            value_release(&widget);
+        }
+    value_release(&widgets);
+    return ok;
+}
+/* A cursor-only row's number: in levelup.gfx the list "Control" and the panels "Status_0" and
+ * "Status_1" are its parent's children; the attributes' rows there (Item_<n>: Text_0, Value_0) are
+ * drawn under the list's rows. The panels' first Value_0 at the row's height, by its middle. */
+#define PANEL_ROWS 16
+static int row_number(uint64_t oi, uint64_t container, const float row[4], float out[4]) {
+    static const char *const panels[]={"Status_0","Status_1"};
+    const GetMemberFn get=(GetMemberFn)interface_original[5];
+    GfxValue parent;
+    memset(&parent,0,sizeof(parent));
+    int ok=0;
+    if ((get(oi,container,"parent",&parent,1)&0xFF) && (parent.type&0x0F)==10)
+        for (size_t p=0;p<sizeof(panels)/sizeof(*panels) && !ok;++p) {
+            GfxValue panel;
+            memset(&panel,0,sizeof(panel));
+            if ((get(oi,parent.value,panels[p],&panel,1)&0xFF) && (panel.type&0x0F)==10)
+                for (int i=0;i<PANEL_ROWS && !ok;++i) {
+                    char name[16];
+                    snprintf(name,sizeof(name),"Item_%d",i);
+                    GfxValue line;
+                    memset(&line,0,sizeof(line));
+                    float r[4];
+                    if ((get(oi,panel.value,name,&line,1)&0xFF) && (line.type&0x0F)==10 && child_bounds(oi,line.value,"Value_0",r) &&
+                        (r[1]+r[3])/2>=row[1] && (r[1]+r[3])/2<row[3] && r[2]-r[0]>4) {
+                        memcpy(out,r,sizeof(r));
+                        ok=1;
+                    }
+                    value_release(&line);
+                }
+            value_release(&panel);
+        }
+    value_release(&parent);
+    return ok;
+}
+/* Measured parts into a control (none where a measurement failed). */
+static void control_parts(uint64_t object, const float part[PARTS][4], const int ok[PARTS]) {
+    host_lock(&menu_lock);
+    Control *c=control_of(object,0);
+    for (int k=0;c && k<PARTS;++k) {
+        if (ok[k]) memcpy(c->part[k],part[k],sizeof(c->part[k]));
+        else memset(c->part[k],0,sizeof(c->part[k]));
+    }
+    host_unlock(&menu_lock);
+}
+typedef ABI void (*SetValueFn)(uint64_t slider, int32_t value, int32_t notify, uint64_t sound, uint64_t name);
+/* A slider gauge's track, measured: in optionsetting.gfx the "Bar" clip (100 frames) holds a
+ * background (child 0, 311x14 around the track), a mask (child 1, 305x7, sliding from all left of
+ * the fill at frame 1 to over it at frame 100) and the fill it uncovers (child 2, 305x7, still): the
+ * value's range. The fill's bounds are its whole length (the mask only hides it); the clip's own
+ * bounds hold the mask too, wherever it is. 0 for a gauge built otherwise. */
+#define GAUGE_CHILDREN 3
+#define GAUGE_FILL 2
+static int gauge_track(uint64_t oi, uint64_t bar, const float bounds[4], float out[4]) {
+    const GetMemberFn get=(GetMemberFn)interface_original[5];
+    const InvokeFn invoke=(InvokeFn)interface_original[7];
+    GfxValue count, index, fill;
+    memset(&count,0,sizeof(count)); memset(&index,0,sizeof(index)); memset(&fill,0,sizeof(fill));
+    double children=0;
+    const int built=(get(oi,bar,"numChildren",&count,1)&0xFF) && number_of(&count,&children) && children==GAUGE_CHILDREN;
+    value_release(&count);
+    if (!built) return 0;
+    const double at=GAUGE_FILL;
+    index.type=5; /* a Number */
+    memcpy(&index.value,&at,8);
+    const int ok=(invoke(oi,bar,&fill,"getChildAt",&index,1,1)&0xFF) && (fill.type&0x0F)==10 && stage_bounds(oi,fill.value,out);
+    value_release(&fill);
+    return ok && out[2]-out[0]>16 && out[0]>=bounds[0]-1 && out[2]<=bounds[2]+1;
+}
+static const int slider_holders[PARTS]={SLIDER_LEFT,SLIDER_RIGHT,SLIDER_BAR};
+/* A slider's state and its clips (0 for one that is not a display object of this interface), and
+ * whether its clip holders are this class's (another layout is left alone). Guarded, as list_read. */
+static int slider_read(uint64_t slider, uint64_t input, Control *out, uint64_t *oi, uint64_t clip[PARTS]) {
+    RuntimeRecoverBuf recover;
+    RuntimeRecoverBuf *previous=runtime_fault_recover;
+    if (RUNTIME_RECOVER_SET(recover)) { runtime_fault_recover=previous; return 0; }
+    runtime_fault_recover=&recover;
+    const uint64_t holder=(uintptr_t)image+CLIP_HOLDER;
+    const int ok=guest_u64(slider+SLIDER_BAR)==holder && guest_u64(slider+SLIDER_LEFT)==holder &&
+                 guest_u64(slider+SLIDER_RIGHT)==holder;
+    if (ok) {
+        out->min=guest_i32(slider+SLIDER_MIN); out->max=guest_i32(slider+SLIDER_MAX);
+        out->value=guest_i32(slider+SLIDER_VALUE); out->step=guest_i32(slider+SLIDER_STEP);
+        out->focused=!input || *(const volatile uint8_t *)(uintptr_t)input!=0;
+        for (int k=0;k<PARTS;++k) {
+            const uint64_t h=slider+slider_holders[k], held=guest_u64(h+HOLDER_OI);
+            clip[k]=guest_u64(h+HOLDER_CLIP);
+            if (!held || !clip[k] || (guest_i32(h+HOLDER_TYPE)&0x0F)!=10 || guest_u64(held)!=(uintptr_t)image+OBJECT_INTERFACE) clip[k]=0;
+            else *oi=held;
+        }
+    }
+    runtime_fault_recover=previous;
+    return ok;
+}
+/* The hook at the start of every slider update (the game's thread): its state and its clips'
+ * bounds; a value the pad thread asked for, once its row is the selected one (the game's
+ * SetValue, as the update calls it after a key press: the listener applies it, the sound plays). */
+static ABI void slider_update(uint64_t slider, uint64_t input) {
+    if (!menu_mouse) return;
+    const uint64_t now=host_monotonic_ns();
+    Control s;
+    uint64_t oi=0, clip[PARTS]={0,0,0};
+    if (!slider_read(slider,input,&s,&oi,clip)) return;
+    int value=0;
+    host_lock(&menu_lock);
+    Control *c=control_of(slider,1);
+    const int fresh=!c->seen_ns || now-c->seen_ns>=LIST_LIVE_NS;
+    c->kind=CONTROL_SLIDER; c->container=0; c->focused=s.focused; c->seen_ns=now;
+    c->min=s.min; c->max=s.max; c->value=s.value; c->step=s.step;
+    const int measure_now=!bounds_broken && (!c->bounds_ns || now-c->bounds_ns>BOUNDS_NS);
+    if (measure_now) c->bounds_ns=now;
+    const int take=slider_state==JUMP_POSTED && slider_target==slider && s.focused;
+    if (take) { value=slider_relative ? s.value+slider_value*(s.step>0 ? s.step : 1) : slider_value; slider_state=JUMP_TAKEN; }
+    int first=0;
+    for (int i=0;fresh && measure_now && i<MAX_LIST_NOTES;++i) {
+        if (noted_lists[i]==slider) break;
+        if (!noted_lists[i]) { noted_lists[i]=slider; first=1; break; }
+    }
+    host_unlock(&menu_lock);
+    if (fresh) menu_note("slider %" PRIx64 ": %d in %d..%d by %d%s",slider,s.value,s.min,s.max,s.step,s.focused ? ", focused" : "");
+    if (measure_now) {
+        float part[PARTS][4]={{0}};
+        int ok[PARTS];
+        measuring=1;
+        for (int k=0;k<PARTS;++k) ok[k]=clip[k] && stage_bounds(oi,clip[k],part[k]);
+        float *bar=part[PART_BAR], track[4];
+        const int measured=ok[PART_BAR] && gauge_track(oi,clip[PART_BAR],bar,track);
+        measuring=0;
+        if (measured) { bar[0]=track[0]; bar[2]=track[2]; } /* its height: the clip's (the fill is 7 px) */
+        else if (ok[PART_BAR] && s.max>s.min) {
+            /* Another gauge: as that one, the clip's bounds reach left of the track by the mask's
+             * share still off it, (1 - full) of the track's length. */
+            const float full=(float)(s.value-s.min)/(float)(s.max-s.min), length=(bar[2]-bar[0])/(2-full);
+            if (full>=0 && full<=1 && length>8) bar[0]=bar[2]-length;
+        }
+        control_parts(slider,(const float (*)[4])part,ok);
+        if (fresh || !ok[PART_BAR])
+            menu_note("slider %" PRIx64 ": bar (%.0f,%.0f)-(%.0f,%.0f), arrows %.0f..%.0f and %.0f..%.0f",slider,
+                      part[PART_BAR][0],part[PART_BAR][1],part[PART_BAR][2],part[PART_BAR][3],
+                      part[PART_LEFT][0],part[PART_LEFT][2],part[PART_RIGHT][0],part[PART_RIGHT][2]);
+        if (first)
+            printf("Menu mouse: slider %" PRIx64 " (%d in %d..%d), track (%.0f,%.0f)-(%.0f,%.0f) %s, arrows %.0f..%.0f and %.0f..%.0f\n",
+                   slider,s.value,s.min,s.max,bar[0],bar[1],bar[2],bar[3],measured ? "measured" : "estimated",
+                   part[PART_LEFT][0],part[PART_LEFT][2],part[PART_RIGHT][0],part[PART_RIGHT][2]);
+    }
+    if (take) {
+        ((SetValueFn)(uintptr_t)(image+SLIDER_SET_VALUE))(slider,value,1,SLIDER_SOUND_ID,(uintptr_t)image+SLIDER_SOUND);
+        const int32_t now_value=guest_i32(slider+SLIDER_VALUE);
+        host_lock(&menu_lock);
+        slider_state=JUMP_DONE;
+        if ((c=control_of(slider,0))) c->value=now_value;
+        host_unlock(&menu_lock);
+        menu_note("slider %" PRIx64 " set to %d (asked %d)",slider,now_value,value);
+    }
+}
+static int control_in_front(const Control *c, uint64_t now, int by_focus);
+/* A spinner's state and its number's clip (0 when it is not a display object of this interface),
+ * and whether it is this class (its vtable, its number's holder). Guarded, as list_read. */
+static int spinner_read(uint64_t spinner, uint64_t input, Control *out, uint64_t *oi, uint64_t *clip) {
+    RuntimeRecoverBuf recover;
+    RuntimeRecoverBuf *previous=runtime_fault_recover;
+    if (RUNTIME_RECOVER_SET(recover)) { runtime_fault_recover=previous; return 0; }
+    runtime_fault_recover=&recover;
+    const uint64_t h=spinner+SPINNER_NUMBER;
+    const int ok=guest_u64(spinner)==(uintptr_t)image+SPINNER_VTABLE && guest_u64(h)==(uintptr_t)image+CLIP_HOLDER;
+    if (ok) {
+        out->min=guest_i32(spinner+SPINNER_MIN); out->max=guest_i32(spinner+SPINNER_MAX);
+        out->value=guest_i32(spinner+SPINNER_VALUE); out->step=guest_i32(spinner+SPINNER_STEP);
+        out->focused=!input || *(const volatile uint8_t *)(uintptr_t)input!=0;
+        *oi=guest_u64(h+HOLDER_OI); *clip=guest_u64(h+HOLDER_CLIP);
+        if (!*oi || !*clip || (guest_i32(h+HOLDER_TYPE)&0x0F)!=10 || guest_u64(*oi)!=(uintptr_t)image+OBJECT_INTERFACE) *clip=0;
+    }
+    runtime_fault_recover=previous;
+    return ok;
+}
+/* The hook at the start of every spinner update (the game's thread): its state, and its arrows'
+ * areas from its number's bounds (the arrows are clips without a name, just above and below it):
+ * above the number's middle steps up, below it down. A click presses the d-pad (menu_pad). */
+static ABI void spinner_update(uint64_t spinner, uint64_t input) {
+    if (!menu_mouse) return;
+    const uint64_t now=host_monotonic_ns();
+    Control s;
+    uint64_t oi=0, clip=0;
+    if (!spinner_read(spinner,input,&s,&oi,&clip)) return;
+    host_lock(&menu_lock);
+    Control *c=control_of(spinner,1);
+    const int fresh=!c->seen_ns || now-c->seen_ns>=LIST_LIVE_NS;
+    c->kind=CONTROL_SPINNER; c->container=0; c->focused=s.focused; c->seen_ns=now;
+    c->min=s.min; c->max=s.max; c->value=s.value; c->step=s.step;
+    const int measure_now=!bounds_broken && (!c->bounds_ns || now-c->bounds_ns>BOUNDS_NS);
+    if (measure_now) c->bounds_ns=now;
+    int first=0;
+    for (int i=0;fresh && measure_now && i<MAX_LIST_NOTES;++i) {
+        if (noted_lists[i]==spinner) break;
+        if (!noted_lists[i]) { noted_lists[i]=spinner; first=1; break; }
+    }
+    host_unlock(&menu_lock);
+    if (!measure_now) return;
+    float number[4]={0,0,0,0}, part[PARTS][4]={{0}};
+    measuring=1;
+    const int measured=clip && stage_bounds(oi,clip,number) && number[2]>number[0];
+    measuring=0;
+    const int ok[PARTS]={measured,measured,0};
+    if (measured) {
+        const float mx=(number[0]+number[2])/2, my=(number[1]+number[3])/2;
+        const float up[4]={mx-SPINNER_REACH_X,number[1]-SPINNER_REACH_Y,mx+SPINNER_REACH_X,my};
+        const float down[4]={mx-SPINNER_REACH_X,my,mx+SPINNER_REACH_X,number[3]+SPINNER_REACH_Y};
+        memcpy(part[PART_RIGHT],up,sizeof(up));
+        memcpy(part[PART_LEFT],down,sizeof(down));
+    }
+    control_parts(spinner,(const float (*)[4])part,ok);
+    if (fresh)
+        menu_note("spinner %" PRIx64 ": %d in %d..%d by %d, number (%.0f,%.0f)-(%.0f,%.0f)%s",spinner,s.value,s.min,s.max,s.step,
+                  number[0],number[1],number[2],number[3],s.focused ? ", focused" : "");
+    if (first)
+        printf("Menu mouse: spinner %" PRIx64 " (%d in %d..%d), number (%.0f,%.0f)-(%.0f,%.0f)%s\n",spinner,s.value,s.min,s.max,
+               number[0],number[1],number[2],number[3],measured ? "" : ", not measured");
+}
+/* The control part under a stage point: a live control's arrow (a little beyond its glyph), else
+ * its bar (a little above and below it too: the track is 14 px high), on the screen in front; -1
+ * for none. */
+static int control_at(float sx, float sy, uint64_t now, int by_focus, int *part) {
+    for (int k=0;k<PARTS;++k)
+        for (int i=0;i<MAX_CONTROLS;++i) {
+            const Control *c=&controls[i];
+            const float m=k==PART_BAR ? 0 : ARROW_MARGIN;
+            float r[4];
+            if (!c->object || now-c->seen_ns>=LIST_LIVE_NS || !control_part(c,k,r) || !control_in_front(c,now,by_focus)) continue;
+            if (sx>=r[0]-m && sx<r[2]+m && sy>=r[1]-ARROW_MARGIN && sy<r[3]+ARROW_MARGIN) { *part=k; return i; }
+        }
+    return -1;
+}
+/* A slider's value at a point of its bar: the bar spans min..max. */
+static int bar_value(const Control *c, float sx) {
+    const float *r=c->part[PART_BAR];
+    float f=(sx-r[0])/(r[2]-r[0]);
+    if (f<0) f=0;
+    if (f>1) f=1;
+    const int step=c->step>0 ? c->step : 1;
+    return c->min+(int)(f*(float)((c->max-c->min)/step)+0.5f)*step;
+}
 /* The hook at the start of every list update (the game's thread): the list's container and
  * selection; a jump the pad thread asked for; its container's items found and measured. */
 static ABI void list_update(uint64_t list, uint64_t input) {
@@ -1187,7 +1678,7 @@ static ABI void list_update(uint64_t list, uint64_t input) {
     ListState s;
     int focused=1;
     if (!list_read(list,input,&oi,&container,&s,&focused)) return;
-    int row, column, a=0, b=0, entry=-1, first=1;
+    int row, column, a=0, b=0, entry=-1, first=0;
     host_lock(&menu_lock);
     MenuContainer *c=container_of(container,1);
     const int fresh=c->list!=list || now-c->list_ns>=LIST_LIVE_NS;
@@ -1205,10 +1696,19 @@ static ABI void list_update(uint64_t list, uint64_t input) {
     if (take) { a=jump_a; b=jump_b; entry=list_entry(&s,a,b); jump_state=JUMP_TAKEN; }
     const int probe_now=!c->probe_ns || now-c->probe_ns>PROBE_NS;
     if (probe_now) c->probe_ns=now;
+    /* A list of one clip, an options row's value: a control with arrows. */
+    int arrows_now=0;
+    if (s.rows<=1 && s.columns<=1) {
+        Control *v=control_of(list,1);
+        v->kind=CONTROL_VALUES; v->container=container; v->focused=focused; v->seen_ns=now;
+        arrows_now=!bounds_broken && (!v->bounds_ns || now-v->bounds_ns>BOUNDS_NS);
+        if (arrows_now && !v->bounds_ns) arrows_now=2; /* the first time: printed */
+        if (arrows_now) v->bounds_ns=now;
+    }
     if (fresh) {
         for (int i=0;i<MAX_LIST_NOTES;++i) {
-            if (noted_lists[i]==list) { first=0; break; }
-            if (!noted_lists[i]) { noted_lists[i]=list; break; }
+            if (noted_lists[i]==list) break;
+            if (!noted_lists[i]) { noted_lists[i]=list; first=1; break; } /* full: printed no more */
         }
     }
     host_unlock(&menu_lock);
@@ -1227,6 +1727,18 @@ static ABI void list_update(uint64_t list, uint64_t input) {
         jump_moved=moved; jump_state=JUMP_DONE;
         host_unlock(&menu_lock);
         menu_note("jump to Item_%d_%d: entry %d of %d, %s",a,b,entry,s.count,moved ? "selected" : "not selectable");
+    }
+    if (arrows_now) {
+        static const char *const names[PARTS]={"LeftItem_0","RightItem_0",NULL};
+        float part[PARTS][4]={{0}};
+        int ok[PARTS]={0,0,0};
+        measuring=1;
+        for (int k=0;k<PART_BAR;++k) ok[k]=child_bounds(oi,container,names[k],part[k]);
+        measuring=0;
+        control_parts(list,(const float (*)[4])part,ok);
+        if (arrows_now==2 && first)
+            printf("Menu mouse: list %" PRIx64 " arrows %.0f..%.0f and %.0f..%.0f at %.0f%s\n",list,part[PART_LEFT][0],part[PART_LEFT][2],
+                   part[PART_RIGHT][0],part[PART_RIGHT][2],part[PART_LEFT][1],ok[PART_LEFT] && ok[PART_RIGHT] ? "" : " (none: its clip's halves)");
     }
     scan_container(oi,container,probe_now,!bounds_broken,selected,now);
 }
@@ -1247,7 +1759,24 @@ static int patch_code(uint32_t offset, const void *bytes, size_t size) {
 #endif
     return 0;
 }
-/* Hooks the list update: its prologue becomes a jump to the hook's code (in the trace's page). */
+/* Hooks a guest function: its prologue (whole instructions without rip-relative operands, at most
+ * TRAMPOLINE_SLOT bytes) becomes a jump to hook code at t (in the trace's page) that calls
+ * hook(rdi, rsi), runs the prologue and goes on after it. */
+typedef ABI void (*HookFn)(uint64_t, uint64_t);
+static int hook_function(unsigned char *t, uint32_t offset, size_t prologue, HookFn hook) {
+    const uint64_t to=(uint64_t)(uintptr_t)hook, back=(uint64_t)(uintptr_t)(image+offset+prologue);
+    memcpy(t,hook_trampoline,sizeof(hook_trampoline));
+    memcpy(t+TRAMPOLINE_HOOK,&to,8);
+    memset(t+TRAMPOLINE_PROLOGUE,0x90,TRAMPOLINE_SLOT);
+    memcpy(t+TRAMPOLINE_PROLOGUE,image+offset,prologue);
+    memcpy(t+TRAMPOLINE_BACK,&back,8);
+    uint8_t jump[TRAMPOLINE_SLOT]={0xFF,0x25,0x00,0x00,0x00,0x00};   /* jmp [rip+0]; the hook's code */
+    const uint64_t target=(uint64_t)(uintptr_t)t;
+    memcpy(jump+6,&target,8);
+    memset(jump+14,0x90,sizeof(jump)-14);
+    return patch_code(offset,jump,prologue);
+}
+/* Hooks the list update and the slider update (their code in the trace's page). */
 static void list_configure(unsigned char *code) {
     if (memcmp(image+LIST_UPDATE,list_update_code,sizeof(list_update_code)) ||
         memcmp(image+LIST_SET_SELECTION,list_set_selection_code,sizeof(list_set_selection_code)) ||
@@ -1255,18 +1784,40 @@ static void list_configure(unsigned char *code) {
         puts("Menu mouse: not the v1.09 list widget (menus take d-pad steps)");
         return;
     }
-    unsigned char *t=code+TRAMPOLINE_AT;
-    const uint64_t hook=(uint64_t)(uintptr_t)list_update, back=(uint64_t)(uintptr_t)(image+LIST_UPDATE+LIST_PROLOGUE);
-    memcpy(t,list_trampoline,sizeof(list_trampoline));
-    memcpy(t+TRAMPOLINE_HOOK,&hook,8);
-    memcpy(t+TRAMPOLINE_PROLOGUE,image+LIST_UPDATE,LIST_PROLOGUE);
-    memcpy(t+TRAMPOLINE_BACK,&back,8);
-    uint8_t jump[LIST_PROLOGUE]={0xFF,0x25,0x00,0x00,0x00,0x00};   /* jmp [rip+0]; the hook's code */
-    const uint64_t target=(uint64_t)(uintptr_t)t;
-    memcpy(jump+6,&target,8);
-    memset(jump+14,0x90,LIST_PROLOGUE-14);
-    if (patch_code(LIST_UPDATE,jump,sizeof(jump))) { puts("Menu mouse: cannot hook the list widget (menus take d-pad steps)"); return; }
+    if (hook_function(code+TRAMPOLINE_AT,LIST_UPDATE,LIST_PROLOGUE,list_update)) {
+        puts("Menu mouse: cannot hook the list widget (menus take d-pad steps)");
+        return;
+    }
     listable=1;
+    if (memcmp(image+SLIDER_UPDATE,slider_update_code,sizeof(slider_update_code)) ||
+        memcmp(image+SLIDER_SET_VALUE,slider_set_value_code,sizeof(slider_set_value_code)) ||
+        memcmp(image+SLIDER_SOUND,slider_sound,sizeof(slider_sound))) {
+        puts("Menu mouse: not the v1.09 slider (sliders take the keys only)");
+        return;
+    }
+    slidable=!hook_function(code+TRAMPOLINE_AT+TRAMPOLINE_SIZE,SLIDER_UPDATE,SLIDER_PROLOGUE,slider_update);
+    if (memcmp(image+SPINNER_UPDATE,spinner_update_code,sizeof(spinner_update_code))) {
+        puts("Menu mouse: not the v1.09 spinner (quantities take the keys only)");
+        return;
+    }
+    hook_function(code+TRAMPOLINE_AT+2*TRAMPOLINE_SIZE,SPINNER_UPDATE,SPINNER_PROLOGUE,spinner_update);
+}
+/* The menus' 1920x1080 stage in the window (points): the presenter fits the game's 16:9 picture
+ * into it, centred, with bars beside a wider one or above and below a taller one (FitImage). */
+static float stage_scale(int window_w, int window_h, float *x, float *y) {
+    const float sw=(float)window_w/STAGE_W, sh=(float)window_h/STAGE_H, scale=sw<sh ? sw : sh;
+    *x=((float)window_w-STAGE_W*scale)/2; *y=((float)window_h-STAGE_H*scale)/2;
+    return scale;
+}
+static void stage_point(float pointer_x, float pointer_y, int window_w, int window_h, float *sx, float *sy) {
+    float x, y;
+    const float scale=stage_scale(window_w,window_h,&x,&y);
+    *sx=(pointer_x-x)/scale; *sy=(pointer_y-y)/scale;
+}
+static void window_point(float sx, float sy, int window_w, int window_h, float *pointer_x, float *pointer_y) {
+    float x, y;
+    const float scale=stage_scale(window_w,window_h,&x,&y);
+    *pointer_x=x+sx*scale; *pointer_y=y+sy*scale;
 }
 /* Pad thread: whether a menu is on screen (the window frees the mouse), and the buttons the
  * pointer adds. Moving onto an item makes it the target, reached with d-pad presses toward it;
@@ -1277,6 +1828,34 @@ static void list_configure(unsigned char *code) {
  * items). A parent menu still updated behind a submenu has the input off. */
 static int input_list(const MenuContainer *c, uint64_t now, int by_focus) {
     return c && c->list && now-c->list_ns<LIST_LIVE_NS && !c->behind && (!by_focus || c->focused);
+}
+/* A control on the screen in front: its row is the selected one (its update has the input), or it
+ * stands beside a row of a list that has the input. Not one under a box over its screen (the
+ * game updates it still, without the input): a yes/no box's buttons over an options screen's
+ * sliders are the box's. */
+static int control_in_front(const Control *c, uint64_t now, int by_focus) {
+    if (c->focused) return 1;
+    float y0=0, y1=0;
+    int parts=0;
+    for (int k=0;k<PARTS;++k) {
+        float r[4];
+        if (!control_part(c,k,r)) continue;
+        if (!parts++ || r[1]<y0) y0=r[1];
+        if (parts==1 || r[3]>y1) y1=r[3];
+    }
+    const float middle=(y0+y1)/2;
+    for (int i=0;parts && i<MAX_CONTAINERS;++i) {
+        const MenuContainer *rows=&containers[i];
+        if (!input_list(rows,now,by_focus) || one_clip(rows) || rows->list_columns>1) continue;
+        const Spacing g=spacing(rows->container,0);
+        for (int j=0;j<menu_item_count;++j) {
+            float r[4];
+            if (!pointable(&menu_items[j],rows->container) || menu_items[j].approx) continue;
+            hit_rect(&menu_items[j],&g,r);
+            if (middle>=r[1] && middle<r[3]) return 1;
+        }
+    }
+    return 0;
 }
 /* An item the pointer may act on: in the menu on top, or in any input list beside it. */
 static int pointable_item(int item, const MenuContainer *menu, uint64_t now, int by_focus) {
@@ -1318,14 +1897,25 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
         press_container=0;
     }
     const int shown=menus>0; /* the mouse stays free over a covered menu, but takes no steps there */
-    int hovered=-1;
+    int hovered=-1, control=-1, part=0;
+    float sx=0;
     const int selected=menu ? menu->selected : -1;
     if (menu && window_w>0 && window_h>0) {
-        const float sx=pointer_x*STAGE_W/window_w, sy=pointer_y*STAGE_H/window_h;
+        float sy;
+        stage_point(pointer_x,pointer_y,window_w,window_h,&sx,&sy);
         hovered=hit(menu->container,sx,sy);
+        control=control_at(sx,sy,now,by_focus,&part);
         /* Lists sharing the screen: the pointer works in each one the game updates. */
         for (int i=0;i<MAX_CONTAINERS && hovered<0 && input_list(menu,now,by_focus);++i)
             if (&containers[i]!=menu && input_list(&containers[i],now,by_focus)) hovered=hit(containers[i].container,sx,sy);
+        /* An options row's value stands for its row (beside the row's name, highlighted with it). */
+        if (hovered<0 || one_clip(container_of(menu_items[hovered].container,0)))
+            for (int i=0;i<MAX_CONTAINERS;++i) {
+                const int row=&containers[i]==menu || input_list(&containers[i],now,by_focus) ? value_row(&containers[i],sx,sy,now) : -1;
+                if (row>=0) { hovered=row; break; }
+            }
+        /* A spinner's arrows have the pointer: a box's buttons under them are not chosen. */
+        if (control>=0 && controls[control].kind==CONTROL_SPINNER) hovered=-1;
     }
     int moved=pointer_x!=last_pointer_x || pointer_y!=last_pointer_y;
     last_pointer_x=pointer_x; last_pointer_y=pointer_y;
@@ -1334,30 +1924,59 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
         /* The pointer starts on the selected item, where the highlight is. */
         float wx=-1, wy=-1;
         if (shown && selected>=0 && menu_items[selected].bounds_ns && window_w>0 && window_h>0) {
-            float pitch_x, pitch_y, r[4];
-            pitches(menu->container,menu_items[selected].approx,&pitch_x,&pitch_y);
-            hit_rect(&menu_items[selected],pitch_x,pitch_y,r);
-            if (menu_items[selected].approx) { r[2]=r[0]+pitch_x; r[3]=r[1]+pitch_y; }
-            wx=(r[0]+r[2])/2*window_w/STAGE_W; wy=(r[1]+r[3])/2*window_h/STAGE_H;
+            float r[4];
+            const Spacing g=spacing(menu->container,menu_items[selected].approx);
+            hit_rect(&menu_items[selected],&g,r);
+            if (menu_items[selected].approx) { r[2]=r[0]+g.pitch[0]; r[3]=r[1]+g.pitch[1]; }
+            window_point((r[0]+r[2])/2,(r[1]+r[3])/2,window_w,window_h,&wx,&wy);
             last_pointer_x=wx; last_pointer_y=wy;
         }
         bbgpu_menu_active(shown,wx,wy);
-        press_until=settle_until=0; blocked=nav_target=confirm_target=last_hovered=-1; steps=0;
+        press_until=settle_until=0; blocked=nav_target=confirm_target=last_hovered=action_control=step_item=-1; steps=dragging=0;
         if (jump_state!=JUMP_TAKEN) jump_state=JUMP_IDLE;
+        if (slider_state!=JUMP_TAKEN) slider_state=JUMP_IDLE;
         moved=0; /* where the pointer rests when a menu opens is not a choice */
         if (menu) menu_note("on screen (container %" PRIx64 ")%s",menu->container,wx>=0 ? ", pointer on the selection" : "");
     }
-    const uint32_t pressed=free_buttons&~previous_free;
+    uint32_t pressed=free_buttons&~previous_free;
     previous_free=free_buttons;
     if (!shown || !menu) { host_unlock(&menu_lock); return 0; }
     /* A list jumps once per item the pointer moves onto, whichever list it is in (a jump may
      * scroll other entries under it; a d-pad move elsewhere is not undone by a resting pointer). */
     const int direct=input_list(menu,now,by_focus);
-    if (direct) { if (moved && hovered>=0 && hovered!=last_hovered && hovered!=blocked) nav_target=hovered; }
+    /* A click on a control (an arrow, a slider's bar) selects its row and presses nothing: the
+     * step or the value goes to the control once its row is the selected one (a spinner has no
+     * row: a box's buttons under it are not chosen). Held on a bar, the button drags along it (the
+     * rows under the pointer meanwhile are not chosen). */
+    if (!(free_buttons&1)) dragging=0;
+    if (direct && (pressed&1) && control>=0) {
+        const Control *c=&controls[control];
+        action_control=control; action_object=c->object; action_part=part; action_ns=now;
+        action_value=part==PART_BAR ? bar_value(c,sx) : part==PART_LEFT ? -1 : 1;
+        dragging=part==PART_BAR;
+        pressed&=~1u;
+        if (hovered>=0 && c->kind!=CONTROL_SPINNER) nav_target=hovered;
+        confirm_target=-1;
+    } else if (direct && dragging && moved) {
+        Control *c=control_of(action_object,0);
+        if (c && c->part[PART_BAR][2]>c->part[PART_BAR][0] && bar_value(c,sx)!=c->value) {
+            action_control=(int)(c-controls); action_part=PART_BAR; action_value=bar_value(c,sx); action_ns=now;
+        }
+    }
+    if (direct) { if (!dragging && moved && hovered>=0 && hovered!=last_hovered && hovered!=blocked) nav_target=hovered; }
     else if (moved && hovered>=0 && hovered!=nav_target && hovered!=blocked) { nav_target=hovered; steps=visited_count=0; }
     last_hovered=hovered;
     if (hovered!=blocked) blocked=-1;
-    if ((pressed&1) && hovered>=0) { nav_target=confirm_target=hovered; steps=visited_count=0; }
+    if ((pressed&1) && hovered>=0) {
+        const MenuItem *h=&menu_items[hovered];
+        nav_target=hovered; steps=visited_count=0;
+        confirm_target=h->select_only ? -1 : hovered;
+        /* A level-up's attribute's number: its left half lowers it, its right half raises it. */
+        if (h->select_only && h->step_x1>h->step_x0 && sx>=h->step_x0-VALUE_REACH && sx<h->step_x1+VALUE_REACH) {
+            step_item=hovered; step_ns=now;
+            step_button=sx<(h->step_x0+h->step_x1)/2 ? PAD_LEFT : PAD_RIGHT;
+        }
+    }
     if (!pointable_item(nav_target,menu,now,by_focus)) nav_target=-1;
     if (!pointable_item(confirm_target,menu,now,by_focus)) confirm_target=-1;
     /* The list the target is in (the menu on top, or a live list beside it). */
@@ -1381,7 +2000,35 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
                 if (confirm_target==jump_target) confirm_target=-1;
             }
         } else if (jump_state==JUMP_POSTED && now-jump_ns>LIST_LIVE_NS) jump_state=JUMP_IDLE; /* its list went */
+        if (slider_state==JUMP_DONE || (slider_state==JUMP_POSTED && now-slider_ns>LIST_LIVE_NS)) slider_state=JUMP_IDLE;
         if (nav_target>=0 && nav_target==lc->selected) nav_target=-1;
+        /* A click on a cursor-only row's number, once the row is selected. */
+        if (step_item>=0) {
+            if (now-step_ns>ACTION_NS || menu_items[step_item].container!=lc->container) step_item=-1;
+            else if (lc->selected==step_item && nav_target<0 && jump_state==JUMP_IDLE) {
+                press_button=step_button; press_until=now+PRESS_NS;
+                menu_note("Item_%d_%d's number: %s",menu_items[step_item].a,menu_items[step_item].b,step_button==PAD_LEFT ? "left" : "right");
+                step_item=-1;
+            }
+        }
+        /* A click on a control, once its row is selected (its update has the input on). */
+        if (action_control>=0) {
+            const Control *c=&controls[action_control];
+            if (c->object!=action_object || now-action_ns>ACTION_NS) action_control=-1; /* gone, or its row not selected */
+            else if (c->focused && now-c->seen_ns<LIST_LIVE_NS && nav_target<0 && jump_state==JUMP_IDLE && slider_state==JUMP_IDLE) {
+                if (c->kind==CONTROL_SLIDER) {
+                    slider_target=c->object; slider_value=action_value; slider_relative=action_part!=PART_BAR;
+                    slider_ns=now; slider_state=JUMP_POSTED;
+                } else if (action_part!=PART_BAR) {
+                    const int spinner=c->kind==CONTROL_SPINNER;
+                    press_button=action_value<0 ? (spinner ? PAD_DOWN : PAD_LEFT) : (spinner ? PAD_UP : PAD_RIGHT);
+                    press_until=now+PRESS_NS;
+                }
+                menu_note("%s %s: %+d",c->kind==CONTROL_SLIDER ? "slider" : c->kind==CONTROL_SPINNER ? "spinner" : "values",
+                          action_part==PART_LEFT ? "back" : action_part==PART_RIGHT ? "on" : "bar",action_value);
+                action_control=-1;
+            }
+        }
         /* A bar (one row of three or more) beside another list, like an inventory's tabs, only
          * switches: the confirm button acts on the other list's selection. A box's buttons (OK,
          * yes/no) are one row of one or two. */
@@ -1472,6 +2119,7 @@ void runtime_menu_configure(unsigned char *base, uint64_t size) {
     menu_mouse=traceable;
     if (menu_mouse) list_configure(hook_page);
     if (menu_mouse) printf("%sMenu mouse: on (menus free the mouse; point, left button confirms, right cancels%s)%s\n",on,
+                           slidable ? "; lists jump to the pointed item, sliders and arrows take clicks" :
                            listable ? "; lists jump to the pointed item" : "",off);
     printf("Menu probe: F7 writes %s/menu-probe-*.txt%s\n",log_dir(),
            traceable ? ", F8 menu-trace-*.txt (4 s of menu calls)" : "");
