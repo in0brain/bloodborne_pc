@@ -23,6 +23,8 @@ void runtime_camera_update(float dx, float dy, int captured, float sensitivity, 
     (void)dy; (void)captured; (void)sensitivity; (void)invert_y;
     camera_dx=dx; camera_stick=stick_camera;
 }
+static int ime_open;
+int runtime_ime_active(void) { return ime_open; }
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
     (void)table; (void)count; (void)name;
     return 0;
@@ -85,6 +87,18 @@ int main(void) {
     menu_adds=BTN_CIRCLE;
     assert(pad_read_state(1,&data)==0 && (data.buttons & BTN_CIRCLE));
     menu_adds=0;
+    /* The game's text dialog: neutral input while it is open, then the press that confirmed the
+     * text is held back until every button is up. */
+    keyboard.held=1u<<BBGPU_PAD_CROSS;
+    ime_open=1;
+    assert(pad_read_state(1,&data)==0 && data.buttons==0);
+    ime_open=0;
+    assert(pad_read_state(1,&data)==0 && data.buttons==0);
+    keyboard.held=0;
+    assert(pad_read_state(1,&data)==0 && data.buttons==0);
+    keyboard.held=1u<<BBGPU_PAD_CROSS;
+    assert(pad_read_state(1,&data)==0 && (data.buttons & BTN_CROSS));
+    keyboard.held=0;
 
     SDL_VirtualJoystickTouchpadDesc touch={.nfingers=2};
     SDL_VirtualJoystickDesc desc;
@@ -126,6 +140,6 @@ int main(void) {
     assert(SDL_DetachVirtualJoystick(id));
     SDL_Quit();
     unlink(path);
-    puts("PASS: pad ABI, debug camera chord, left/right clicks, keyboard and mouse bindings, "
+    puts("PASS: pad ABI, debug camera chord, left/right clicks, keyboard and mouse bindings, text dialog, "
          "SDL touch coordinates, overlay capture");
 }
