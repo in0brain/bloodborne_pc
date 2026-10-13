@@ -249,6 +249,25 @@ again to change the settings; Save settings writes them without building. It nee
 Windows: `setup.bat` compiles `tools\setup\BbportSetup.cs` with the C# compiler of .NET Framework
 4 into `out\bbport-setup.exe`. The steps below do the same by hand.
 
+**Deployment script:** `tools\deploy_windows.ps1` installs without a window and without
+questions, for scripts and for testing a fresh copy. It takes MSYS2 from `-Msys2Dir` (default
+`BB_MSYS2`, else `C:\msys64`) or, when that folder is missing, extracts MSYS2's portable archive
+there (no installer, no administrator rights), installs the packages below, clones `-Repo` at
+`-Branch` with its submodules into `-InstallDir` and builds. It then checks the result without a
+game window (`bb-probe.exe --vulkan-only` loads the DLLs and runs a Vulkan submission; the
+launcher's dry run prepares the game image and the patches) and, with `-SmokeTest`, starts the
+game and closes it after 30 s of frames (the logos and the title screen). The script needs no
+checkout, so it can be downloaded alone:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File deploy_windows.ps1 -InstallDir D:\Games\bbport -GameDir D:\Games\CUSA03173 -SmokeTest
+```
+
+An `-Msys2Dir` of its own (e.g. `D:\Games\msys64`) tests the dependencies from nothing and leaves
+an existing MSYS2 alone; an existing MSYS2 is updated only when packages are missing (or with
+`-UpdateMsys2`). Run it again to update the copy (fast-forward only). The output is also in
+`logs\deploy-*.log`; git and pacman take a proxy from `HTTPS_PROXY`.
+
 1. Install MSYS2 to `C:\msys64` (another folder: set `BB_MSYS2`) and, in an MSYS2 shell, update it
    (`pacman -Syu`, again until nothing is left to do) and install the packages:
 
@@ -297,7 +316,7 @@ covers file system and time zone details. With libc++ on Windows, `std::thread::
 | `gpu/` | Renderer library: vendored shadPS4 video core with this port's changes (`gpu/VENDOR.txt`), shims, ImGui menu, FSR 4.1.1 runtime (`gpu/shadps4/video_core/renderer_vulkan/fsr411`) |
 | `launcher/`, `packaging/` | GTK4 launcher; Nix package and AppImage |
 | `patches/` | Community patches for Bloodborne |
-| `tools/` | Developer tools: scripted runs, A/B toggles, FSR benchmark helpers, FSR 4 shader rewrites, `fsr4cap` (FSR 4.1.1 recording/extraction) |
+| `tools/` | Developer tools: scripted runs, A/B toggles, FSR benchmark helpers, FSR 4 shader rewrites, `fsr4cap` (FSR 4.1.1 recording/extraction); Windows setup program (`setup/`) and deployment script (`deploy_windows.ps1`) |
 | `tests/` | Loader, runtime, patch and renderer tests |
 | `docs/` | Design notes and measurements ([upscaler](docs/upscaler.md), [parallel GPU](docs/parallel_gpu.md), [motion vectors](docs/motion_vectors.md), [roadmap](docs/ROADMAP.md)) |
 
