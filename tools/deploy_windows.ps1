@@ -20,6 +20,8 @@
       5. -Fsr4Models, -DlssModel: the optional upscaler downloads.
       6. The build: build.sh in MSYS2's CLANG64 environment (out\bb-probe.exe).
       7. out\game_dir.txt, and Bloodborne.cmd when there is none (setup.bat writes a fuller one).
+         -Settings FILE: its key=value lines go into bbport.ini (a key there is replaced, the
+         other settings stay), e.g. configs\keymap-in0brain.ini, a keyboard and mouse layout.
       8. Checks without a game window: bb-probe.exe --vulkan-only (its DLLs load and a Vulkan
          device runs a submission) and the launcher's dry run (BB_DRY_RUN=1: the game image and
          the patches are prepared, the game is not started).
@@ -37,6 +39,12 @@
     A copy with its own MSYS2, which tests the dependencies from nothing and leaves C:\msys64 alone:
 
     powershell -NoProfile -ExecutionPolicy Bypass -File deploy_windows.ps1 -InstallDir E:\bbtest\bbport -Msys2Dir E:\bbtest\msys64 -GameDir D:\Games\CUSA03173 -SmokeTest
+
+.EXAMPLE
+    The repository's keyboard and mouse layout in a copy's settings (the path is found in the
+    install folder once the sources are there):
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File tools\deploy_windows.ps1 -InstallDir D:\Games\bbport -GameDir D:\Games\CUSA03173 -Settings configs\keymap-in0brain.ini
 #>
 [CmdletBinding()]
 param(
@@ -53,6 +61,9 @@ param(
     [switch]$NoPull,
     [switch]$Fsr4Models,
     [switch]$DlssModel,
+    # key=value lines for <InstallDir>\bbport.ini. A relative path is looked up from the current
+    # folder, then from the install folder (configs\keymap-in0brain.ini of the sources).
+    [string]$Settings,
     [switch]$SmokeTest,
     # How long the smoke test waits for frames (the first start compiles the shaders).
     [int]$SmokeSeconds = 300
@@ -377,6 +388,42 @@ function Write-Launcher {
     Write-Log "Wrote $launcher"
 }
 
+function Resolve-Settings {
+    if ([IO.Path]::IsPathRooted($Settings)) { return $Settings }
+    foreach ($base in (Get-Location).ProviderPath, $InstallDir) {
+        $path = Join-Path $base $Settings
+        if (Test-Path -LiteralPath $path -PathType Leaf) { return $path }
+    }
+    Fail "-Settings: $Settings is neither in $((Get-Location).ProviderPath) nor in $InstallDir"
+}
+
+# -Settings into bbport.ini as setup.bat's program writes it: a key already there is replaced in
+# place, the others are appended. The game reads the defaults first, so a short file is enough.
+function Merge-Settings {
+    $source = Resolve-Settings
+    $values = [ordered]@{}
+    foreach ($line in Get-Content -LiteralPath $source) {
+        if ($line -match '^\s*([A-Za-z0-9_]+)\s*=(.*)$') { $values[$Matches[1]] = $Matches[2].Trim() }
+    }
+    if (-not $values.Count) { Fail "-Settings: no key=value lines in $source" }
+    $ini = Join-Path $InstallDir 'bbport.ini'
+    $lines = New-Object Collections.Generic.List[string]
+    if (Test-Path $ini) { foreach ($line in @(Get-Content -LiteralPath $ini)) { $lines.Add($line) } }
+    if (-not $lines.Count) { $lines.Add('# bbport settings (in-game menu: Insert / L3+R3)') }
+    $replaced = @{}
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '^\s*([A-Za-z0-9_]+)\s*=' -and $values.Contains($Matches[1])) {
+            $key = $Matches[1]
+            $lines[$i] = "$key=$($values[$key])"
+            $replaced[$key] = $true
+        }
+    }
+    foreach ($key in $values.Keys) { if (-not $replaced.ContainsKey($key)) { $lines.Add("$key=$($values[$key])") } }
+    # CRLF, as the game writes the file on Windows.
+    [IO.File]::WriteAllText($ini, (($lines -join "`r`n") + "`r`n"))
+    Write-Log "Settings from ${source}: $($values.Count) values in bbport.ini ($($replaced.Count) replaced)"
+}
+
 function Test-Vulkan {
     $probe = Join-Path $InstallDir 'out\bb-probe.exe'
     if (-not (Test-Path $probe)) { Fail "The build left no $probe" }
@@ -484,6 +531,11 @@ Assert-PlainPath $InstallDir '-InstallDir'
 Assert-PlainPath $Msys2Dir '-Msys2Dir'
 if ($GameDir.Contains('"')) { Fail "-GameDir must not contain double quotes: $GameDir" }
 if ($Repo -match "['`"\s]" -or $Branch -match "['`"\s]") { Fail '-Repo and -Branch must not contain quotes or spaces.' }
+# A wrong absolute path fails now, not after the build; a relative one may name a file of the
+# sources, which a new install gets later.
+if ($Settings -and [IO.Path]::IsPathRooted($Settings) -and -not (Test-Path -LiteralPath $Settings -PathType Leaf)) {
+    Fail "-Settings: no file $Settings"
+}
 
 # Windows error boxes (a missing DLL, a crash) would wait for a click; the programs started here
 # inherit this and fail with an exit code instead.
@@ -534,8 +586,9 @@ try {
     Write-Step 'Build'
     Assert-Exit (Invoke-Bash 'bash build.sh' -Directory $InstallDir) 'The build (out\gpu-build.log has the GPU library log)'
 
-    Write-Step 'Launcher'
+    Write-Step 'Launcher and settings'
     Write-Launcher
+    if ($Settings) { Merge-Settings }
 
     Write-Step 'Vulkan and DLLs (bb-probe.exe --vulkan-only)'
     Test-Vulkan

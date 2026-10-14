@@ -266,7 +266,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File deploy_windows.ps1 -InstallD
 An `-Msys2Dir` of its own (e.g. `D:\Games\msys64`) tests the dependencies from nothing and leaves
 an existing MSYS2 alone; an existing MSYS2 is updated only when packages are missing (or with
 `-UpdateMsys2`). Run it again to update the copy (fast-forward only). The output is also in
-`logs\deploy-*.log`; git and pacman take a proxy from `HTTPS_PROXY`.
+`logs\deploy-*.log`; git and pacman take a proxy from `HTTPS_PROXY`. `-Settings FILE` writes a
+file's `key=value` lines into the copy's `bbport.ini` (keys there are replaced, the rest stays);
+`configs\keymap-in0brain.ini` is a keyboard and mouse layout made for the Asia dump (Circle
+confirms; swap `key_cross` and `key_circle` for a US or EU dump).
 
 1. Install MSYS2 to `C:\msys64` (another folder: set `BB_MSYS2`) and, in an MSYS2 shell, update it
    (`pacman -Syu`, again until nothing is left to do) and install the packages:
