@@ -831,7 +831,7 @@ static MenuContainer containers[MAX_CONTAINERS];
 static __thread int pending_item=-1, pending_cursor=-1, measuring;
 static int bounds_broken;            /* a measurement failed badly: no more */
 /* Pad thread: the navigation. */
-static int menu_shown, blocked=-1, nav_target=-1, confirm_target=-1, press_from=-1, steps, last_hovered=-1;
+static int menu_shown, blocked=-1, nav_target=-1, confirm_target=-1, press_from=-1, steps;
 static int visited[MAX_VISITED], visited_count;
 static float last_pointer_x=-1, last_pointer_y=-1;
 static uint32_t press_button, previous_free;
@@ -1820,8 +1820,9 @@ static void window_point(float sx, float sy, int window_w, int window_h, float *
     *pointer_x=x+sx*scale; *pointer_y=y+sy*scale;
 }
 /* Pad thread: whether a menu is on screen (the window frees the mouse), and the buttons the
- * pointer adds. Moving onto an item makes it the target, reached with d-pad presses toward it;
- * keys and the wheel stay free otherwise (a resting pointer does not pull the selection back).
+ * pointer adds. A moving pointer makes the item under it the target, reached with d-pad presses
+ * toward it; keys and the wheel stay free otherwise (a resting pointer does not pull the
+ * selection back).
  * The left button targets the item under the pointer and confirms on it; the right one cancels. */
 /* A list the game updates now with the input on (by_focus: when any list has it; else every
  * list it updates), alone or sharing the screen with another (an inventory's tab bar and its
@@ -1932,7 +1933,7 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
             last_pointer_x=wx; last_pointer_y=wy;
         }
         bbgpu_menu_active(shown,wx,wy);
-        press_until=settle_until=0; blocked=nav_target=confirm_target=last_hovered=action_control=step_item=-1; steps=dragging=0;
+        press_until=settle_until=0; blocked=nav_target=confirm_target=action_control=step_item=-1; steps=dragging=0;
         if (jump_state!=JUMP_TAKEN) jump_state=JUMP_IDLE;
         if (slider_state!=JUMP_TAKEN) slider_state=JUMP_IDLE;
         moved=0; /* where the pointer rests when a menu opens is not a choice */
@@ -1941,8 +1942,10 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
     uint32_t pressed=free_buttons&~previous_free;
     previous_free=free_buttons;
     if (!shown || !menu) { host_unlock(&menu_lock); return 0; }
-    /* A list jumps once per item the pointer moves onto, whichever list it is in (a jump may
-     * scroll other entries under it; a d-pad move elsewhere is not undone by a resting pointer). */
+    /* A list jumps to the item under a moving pointer, whichever list it is in: the mouse first,
+     * so a move within the item a key or wheel step left brings the selection back. A resting
+     * pointer pulls nothing back (a jump may scroll other entries under it; the wheel steps
+     * through a long list). */
     const int direct=input_list(menu,now,by_focus);
     /* A click on a control (an arrow, a slider's bar) selects its row and presses nothing: the
      * step or the value goes to the control once its row is the selected one (a spinner has no
@@ -1963,9 +1966,8 @@ static uint32_t menu_pad(float pointer_x, float pointer_y, int window_w, int win
             action_control=(int)(c-controls); action_part=PART_BAR; action_value=bar_value(c,sx); action_ns=now;
         }
     }
-    if (direct) { if (!dragging && moved && hovered>=0 && hovered!=last_hovered && hovered!=blocked) nav_target=hovered; }
+    if (direct) { if (!dragging && moved && hovered>=0 && hovered!=blocked) nav_target=hovered; }
     else if (moved && hovered>=0 && hovered!=nav_target && hovered!=blocked) { nav_target=hovered; steps=visited_count=0; }
-    last_hovered=hovered;
     if (hovered!=blocked) blocked=-1;
     if ((pressed&1) && hovered>=0) {
         const MenuItem *h=&menu_items[hovered];
