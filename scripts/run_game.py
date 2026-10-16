@@ -52,8 +52,9 @@ def exit_status(code):
 
 def run(arguments, capture=False, check=True, environment=None):
     """Runs a step in the port's folder; a failed step ends the launch with its status."""
+    # A captured step prints a path: UTF-8, as main() sets PYTHONIOENCODING for the scripts.
     result = subprocess.run([str(a) for a in arguments], env=environment,
-                            stdout=subprocess.PIPE if capture else None, text=True)
+                            stdout=subprocess.PIPE if capture else None, encoding='utf-8')
     if check and result.returncode:
         sys.exit(exit_status(result.returncode))
     return result.stdout.strip() if capture else result.returncode
@@ -121,7 +122,7 @@ def configured_live_resolution(config):
     """bbport.ini's live_resolution (0, 1 or auto; the last such line), else ''."""
     value = ''
     try:
-        lines = Path(config).read_text(errors='replace').splitlines()
+        lines = Path(config).read_text(encoding='utf-8-sig', errors='replace').splitlines()
     except OSError:
         return value
     for line in lines:
@@ -137,7 +138,7 @@ def enter_button(config, game):
     dumps also act with circle and dodge with cross in the game)."""
     value = 'auto'
     try:
-        for line in Path(config).read_text(errors='replace').splitlines():
+        for line in Path(config).read_text(encoding='utf-8-sig', errors='replace').splitlines():
             match = re.fullmatch(r'enter_button=(auto|circle|cross)', line.strip())
             if match:
                 value = match.group(1)
@@ -314,6 +315,10 @@ def main():
     caller_dir = os.getcwd()
     os.chdir(ROOT)
     sys.stdout.reconfigure(line_buffering=True)
+    # The scripts below write to pipes in UTF-8, whatever the locale (GBK on Chinese Windows
+    # cannot hold every path) or the caller's PYTHONIOENCODING; run() reads them so. Windows
+    # consoles ignore the variable (Python writes them UTF-16).
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
     if not WINDOWS:
         signal.signal(signal.SIGINT, signal.SIG_DFL)  # Ctrl+C ends the launch as it ended run.sh
     arguments = sys.argv[1:]
