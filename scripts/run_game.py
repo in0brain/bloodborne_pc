@@ -431,6 +431,10 @@ def main():
         if os.environ.get('BB_AUTO_ENTER_BUTTON') == '1' or not env('BB_ENTER_BUTTON'):
             os.environ.update(BB_ENTER_BUTTON=enter_button(config, merged), BB_AUTO_ENTER_BUTTON='1')
         print(f'Confirm button: {os.environ["BB_ENTER_BUTTON"]}')
+        # The mouse in menus (runtime_menu.c) is on unless BB_MENU_PROBE=0: a menu frees the mouse
+        # the camera holds and draws the cursor. Without it a menu keeps the mouse hidden.
+        if not env('BB_MENU_PROBE'):
+            os.environ['BB_MENU_PROBE'] = '1'
         if not env('BB_VBLANK_HZ'):
             os.environ['BB_VBLANK_HZ'] = {'uncap': '0', '90': '90'}.get(fps, '60')
         if not WINDOWS:

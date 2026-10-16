@@ -10,7 +10,7 @@
   - 鼠标直接转动游戏镜头，1:1，不模拟右摇杆；锁定时仍由游戏瞄准，望远镜单独处理。
   - `bbport.ini` 的 `key_*` 键位：一个操作可以绑多个输入，支持组合键（如 `shift+mouse_left`）、鼠标按键和滚轮，另有走路键。启动器和游戏内的设置菜单里也能改。
   - 确认键 `enter_button=auto|circle|cross`：`auto` 按游戏区域决定，日版、亚洲版、韩版用 ○ 确认。
-  - 菜单鼠标点选（`BB_MENU_PROBE=1` 开启）：指向即选中，左键确认、右键返回；选项值、滑块、下拉框、文本框、商店数量、升级属性都能用鼠标操作；自带光标，任何窗口大小和分辨率都能用。用键盘或滚轮移动选项后，鼠标一动，选中项就回到鼠标所指的地方。
+  - 菜单鼠标点选（本仓库默认开启，`BB_MENU_PROBE=0` 关闭）：指向即选中，左键确认、右键返回；选项值、滑块、下拉框、文本框、商店数量、升级属性都能用鼠标操作；自带光标，任何窗口大小和分辨率都能用；用手柄时光标自动隐藏，动鼠标、点击或按键盘就重新出现（手柄部分尚未实测，欢迎反馈）。用键盘或滚轮移动选项后，鼠标一动，选中项就回到鼠标所指的地方。
   - 修复游戏文本输入框打开时按键或点击导致的闪退；输入时屏幕上显示正在输入的文字，支持系统输入法。
   - 其他修复：MSYS2 clang/libc++ 23 下的构建、窗口最小化时退出、渲染线程丢失 record chunk 时的闪退（exit 139）。
 - **减少着色器编译卡顿**（[PR #8](https://github.com/yumlevi/bloodborne_pc/pull/8)）
@@ -254,7 +254,8 @@ pass), `BB_FSR4_PROFILE=1` (GPU time per FSR 4 pass), `BB_UPSCALER=taa|fsr3|fsr4
 0 = unbounded), `BB_PRESENT_THREAD=0` (present on the vblank thread, as before),
 `BB_LIVE_RES=1` (live resolution changes instead of the startup patch for outputs other than 1080p),
 `BB_PAD_RECORD=file` / `BB_PAD_REPLAY=file` (record a route with F9, replay it in scripted tests),
-`BB_MENU_PROBE=1` (the mouse in menus, a prototype: a menu frees the mouse, pointing at an item or
+`BB_MENU_PROBE=1` (the mouse in menus, a prototype; the launcher sets it unless it is set, so
+`BB_MENU_PROBE=0` turns it off: a menu frees the mouse, pointing at an item or
 an option's value selects it, in one jump in the game's lists, the left button confirms, the right
 one cancels; a click on an option's arrows or slider, a quantity's arrows or a level-up attribute's
 number changes it; F7 writes the game's live menu objects to `logs/menu-probe-*.txt`, F8 its next
