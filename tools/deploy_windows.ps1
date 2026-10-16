@@ -9,6 +9,8 @@
 
       1. Checks: 64-bit Windows 10 1803 or newer, the GPU driver's Vulkan loader, the free space,
          the game folder (eboot.bin, sce_module, version 01.09 in sce_sys\param.sfo).
+         -GameZip FILE: a .zip of the dump (e.g. a backup from a cloud drive) is extracted first,
+         to -GameDir or a folder named after the zip beside the install folder.
       2. MSYS2 at -Msys2Dir. When that folder does not exist, MSYS2's portable archive is
          extracted there: no installer, no administrator rights, nothing outside the folder.
       3. The MSYS2 packages README "Windows" lists. A new MSYS2 is updated first. An existing one
@@ -33,26 +35,38 @@
     git and pacman in MSYS2 take a proxy from HTTPS_PROXY / HTTP_PROXY, not from Windows.
 
 .EXAMPLE
-    powershell -NoProfile -ExecutionPolicy Bypass -File tools\deploy_windows.ps1 -InstallDir D:\Games\bbport -GameDir D:\Games\CUSA03173 -SmokeTest
+    The game as a zip (e.g. from a cloud drive), everything in one folder. In that folder (a
+    path without spaces or non-ASCII characters) put this script and the zip renamed game.zip,
+    open PowerShell there and run, unchanged:
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy_windows.ps1 -InstallDir .\bbport -GameZip .\game.zip -Msys2Dir .\msys64 -SmokeTest
+
+    The folder then holds game\ (the dump), msys64\ and bbport\, whose Bloodborne.cmd starts the
+    game. docs\DEPLOY_WINDOWS.zh.md explains every step (in Chinese).
 
 .EXAMPLE
-    A copy with its own MSYS2, which tests the dependencies from nothing and leaves C:\msys64 alone:
+    An extracted dump and the shared MSYS2 (BB_MSYS2, else C:\msys64); <install folder> and
+    <game folder> stand for your paths:
 
-    powershell -NoProfile -ExecutionPolicy Bypass -File deploy_windows.ps1 -InstallDir E:\bbtest\bbport -Msys2Dir E:\bbtest\msys64 -GameDir D:\Games\CUSA03173 -SmokeTest
+    powershell -NoProfile -ExecutionPolicy Bypass -File tools\deploy_windows.ps1 -InstallDir <install folder> -GameDir <game folder> -SmokeTest
 
 .EXAMPLE
-    The repository's keyboard and mouse layout in a copy's settings (the path is found in the
-    install folder once the sources are there):
+    The repository's keyboard and mouse layout in a copy's settings (a relative path is found
+    in the install folder once the sources are there):
 
-    powershell -NoProfile -ExecutionPolicy Bypass -File tools\deploy_windows.ps1 -InstallDir D:\Games\bbport -GameDir D:\Games\CUSA03173 -Settings configs\keymap-in0brain.ini
+    powershell -NoProfile -ExecutionPolicy Bypass -File tools\deploy_windows.ps1 -InstallDir <install folder> -GameDir <game folder> -Settings configs\keymap-in0brain.ini
 #>
 [CmdletBinding()]
 param(
     # The folder for the sources, the build, saves (user\), settings (bbport.ini) and logs.
     [Parameter(Mandatory = $true)][string]$InstallDir,
-    # The game dump (eboot.bin, sce_module, sce_sys, dvdroot_ps4). Default: the one remembered in
+    # The game dump (eboot.bin, sce_module, sce_sys, dvdroot_ps4). Default: with -GameZip a
+    # folder named after the zip beside the install folder, else the one remembered in
     # <InstallDir>\out\game_dir.txt.
     [string]$GameDir,
+    # A .zip of the dump: eboot.bin and the rest at its root or in one folder. Extracted to
+    # -GameDir unless that already holds eboot.bin (then the zip may be deleted).
+    [string]$GameZip,
     # Default: BB_MSYS2, else C:\msys64.
     [string]$Msys2Dir,
     [string]$Repo = 'https://github.com/in0brain/bloodborne_pc.git',
@@ -171,6 +185,19 @@ function Invoke-Bash {
         -Environment @{ MSYSTEM = 'CLANG64'; CHERE_INVOKING = '1' } -Capture:$Capture
 }
 
+# A bash step that downloads: a dropped connection is tried again (three tries in all). git
+# fetch and pacman keep what they have, so a retry goes on from there.
+function Invoke-Network {
+    param([string]$Command, [string]$What, [string]$Directory)
+    for ($attempt = 1; ; $attempt++) {
+        $code = Invoke-Bash $Command -Directory $Directory
+        if ($code -eq 0) { return }
+        if ($attempt -ge 3) { Assert-Exit $code $What }
+        Write-Log "$What failed (exit code $code); trying again ($($attempt + 1)/3)" Yellow
+        Start-Sleep -Seconds 5
+    }
+}
+
 # A batch file through cmd.exe, standard error merged.
 function Invoke-Cmd([string]$Command, [hashtable]$Environment = @{}) {
     Write-Log "> $Command" DarkGray
@@ -250,6 +277,44 @@ function Test-GameDir {
     if (-not $version.StartsWith('01.09')) { Fail "bbport needs game version 01.09; $GameDir has $version (install the 1.09 update into the dump)." }
 }
 
+# -GameZip to -GameDir. It is extracted beside the target and renamed when complete, so an
+# interrupted extraction never passes for a game folder on the next run.
+function Expand-Game {
+    if (Test-Path -LiteralPath (Join-Path $GameDir 'eboot.bin')) {
+        Write-Log "The game is in $GameDir already; the zip is not extracted again."
+        return
+    }
+    if ((Test-Path -LiteralPath $GameDir) -and (Get-ChildItem -Force -LiteralPath $GameDir | Select-Object -First 1)) {
+        Fail "$GameDir is not empty and holds no eboot.bin: choose another -GameDir for the zip."
+    }
+    $size = (Get-Item -LiteralPath $GameZip).Length
+    Assert-FreeSpace $GameDir ([math]::Ceiling($size / 1GB) + 1) 'Game folder'
+    $stage = "$GameDir.partial"
+    if (Test-Path -LiteralPath $stage) {
+        Write-Log "Removing $stage, left by an interrupted extraction"
+        Remove-Item -LiteralPath $stage -Recurse -Force
+    }
+    New-Item -ItemType Directory $stage | Out-Null
+    Write-Log ('Extracting {0} ({1:N1} GB)' -f $GameZip, ($size / 1GB))
+    # Windows' own tar (bsdtar): ZIP64 archives, and a file whose CRC does not match fails it.
+    $tar = Join-Path $env:WINDIR 'System32\tar.exe'
+    Assert-Exit (Invoke-Cmd "`"$tar`" -x -f `"$GameZip`" -C `"$stage`"") 'Extracting the game zip'
+    # A zip made of the dump's folder holds that folder.
+    $source = $stage
+    if (-not (Test-Path -LiteralPath (Join-Path $stage 'eboot.bin'))) {
+        $inner = @(Get-ChildItem -Force -LiteralPath $stage)
+        if ($inner.Count -ne 1 -or -not $inner[0].PSIsContainer -or -not (Test-Path -LiteralPath (Join-Path $inner[0].FullName 'eboot.bin'))) {
+            Fail "$GameZip has no eboot.bin at its root or in a single folder (extracted to $stage)."
+        }
+        $source = $inner[0].FullName
+    }
+    if (Test-Path -LiteralPath $GameDir) { Remove-Item -LiteralPath $GameDir }  # empty, checked above
+    Move-Item -LiteralPath $source -Destination $GameDir
+    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage }  # empty after a folder moved out
+    $files = @(Get-ChildItem -LiteralPath $GameDir -Recurse -File -Force).Count
+    Write-Log "Extracted $files files to $GameDir"
+}
+
 # ---- MSYS2 -------------------------------------------------------------------------------------
 
 function Install-Msys2 {
@@ -261,7 +326,8 @@ function Install-Msys2 {
     $stage = Join-Path $parent ".bbport-msys2-$PID"
     try {
         Write-Log "Downloading $Msys2Archive"
-        & curl.exe -fsSL --retry 3 -o $download $Msys2Archive
+        # A dropped connection (exit 18, a partial file) is retried too, from where it stopped.
+        & curl.exe -fsSL --retry 5 --retry-all-errors --retry-delay 3 -C - -o $download $Msys2Archive
         Assert-Exit $LASTEXITCODE 'Downloading MSYS2'
         Write-Log ('{0:N0} MB' -f ((Get-Item $download).Length / 1MB))
         Write-Log "Extracting MSYS2 to $Msys2Dir"
@@ -305,8 +371,8 @@ function Update-Packages([bool]$Fresh) {
     # As MSYS2's documentation does: a stale package database installs too old packages. The
     # first update may only replace MSYS2's own core and end early; the second does the rest.
     Invoke-Bash 'pacman -Syuu --noconfirm' | Out-Null
-    Assert-Exit (Invoke-Bash 'pacman -Syuu --noconfirm') 'Updating MSYS2'
-    Assert-Exit (Invoke-Bash ('pacman -S --needed --noconfirm ' + ($Packages -join ' '))) 'Installing the MSYS2 packages'
+    Invoke-Network 'pacman -Syuu --noconfirm' 'Updating MSYS2'
+    Invoke-Network ('pacman -S --needed --noconfirm ' + ($Packages -join ' ')) 'Installing the MSYS2 packages'
     $missing = @(Get-MissingPackages)
     if ($missing.Count) { Fail "Still missing after the install: $($missing -join ', ')" }
     $headers = Get-VulkanHeadersVersion
@@ -323,31 +389,39 @@ function Get-GitLine([string]$Arguments) {
 
 function Sync-Sources {
     $git = "git -c safe.directory='*'"
-    if (Test-Path (Join-Path $InstallDir '.git')) {
+    $hasGit = Test-Path (Join-Path $InstallDir '.git')
+    if ($hasGit -and (Test-Path (Join-Path $InstallDir 'build.sh'))) {
         Write-Log "Checkout in $InstallDir"
         $current = Get-GitLine 'rev-parse --abbrev-ref HEAD'
         $dirty = Get-GitLine 'status --porcelain --untracked-files=no --ignore-submodules=dirty'
         if ($NoPull) { Write-Log 'Not updated (-NoPull).' }
         elseif ($current -ne $Branch) { Write-Log "Branch $current is checked out, not ${Branch}: not updated." Yellow }
         elseif ($dirty) { Write-Log "Local changes: not updated.`n$dirty" Yellow }
-        else { Assert-Exit (Invoke-Bash "$git pull --ff-only" -Directory $InstallDir) 'Updating the sources' }
+        else { Invoke-Network "$git pull --ff-only" 'Updating the sources' -Directory $InstallDir }
     } elseif (Test-Path (Join-Path $InstallDir 'build.sh')) {
         Write-Log "Sources without git in ${InstallDir}: the submodules must be there already (a GitHub ZIP lacks them)." Yellow
         return
     } else {
-        $other = @(Get-ChildItem -Force -LiteralPath $InstallDir | Where-Object { $_.Name -ne 'logs' -and $DumpEntries -notcontains $_.Name })
-        if ($other.Count) { Fail "$InstallDir is not empty and has no bbport sources (it holds $($other[0].Name)); choose a new or empty folder." }
-        # init + fetch instead of clone: the folder already holds this log, perhaps the dump.
-        Write-Log "Cloning $Repo ($Branch) into $InstallDir"
-        Assert-Exit (Invoke-Bash "$git init -q && $git remote add origin '$Repo' && $git fetch origin && $git checkout -q -b '$Branch' --track 'origin/$Branch'" -Directory $InstallDir) "Cloning $Repo"
-        if ($InstallDir -eq $GameDir) {
-            # The dump stays out of git status, as in a checkout that holds its game.
-            $exclude = Join-Path $InstallDir '.git\info\exclude'
-            $lines = "`n# Game data (Bloodborne v1.09 dump) kept next to the port`n" + (($DumpEntries | ForEach-Object { if ($_ -like '*.*') { "/$_" } else { "/$_/" } }) -join "`n") + "`n"
-            [IO.File]::AppendAllText($exclude, $lines)
+        # init + fetch instead of clone: the folder already holds this log, perhaps the dump. A
+        # .git without sources is a clone a dropped connection interrupted: it goes on.
+        if ($hasGit) {
+            Write-Log "Continuing the interrupted clone in $InstallDir"
+        } else {
+            $other = @(Get-ChildItem -Force -LiteralPath $InstallDir | Where-Object { $_.Name -ne 'logs' -and $DumpEntries -notcontains $_.Name })
+            if ($other.Count) { Fail "$InstallDir is not empty and has no bbport sources (it holds $($other[0].Name)); choose a new or empty folder." }
+            Write-Log "Cloning $Repo ($Branch) into $InstallDir"
+            Assert-Exit (Invoke-Bash "$git init -q && $git remote add origin '$Repo'" -Directory $InstallDir) 'Preparing the clone'
+            if ($InstallDir -eq $GameDir) {
+                # The dump stays out of git status, as in a checkout that holds its game.
+                $exclude = Join-Path $InstallDir '.git\info\exclude'
+                $lines = "`n# Game data (Bloodborne v1.09 dump) kept next to the port`n" + (($DumpEntries | ForEach-Object { if ($_ -like '*.*') { "/$_" } else { "/$_/" } }) -join "`n") + "`n"
+                [IO.File]::AppendAllText($exclude, $lines)
+            }
         }
+        Invoke-Network "$git fetch origin" "Fetching $Repo" -Directory $InstallDir
+        Assert-Exit (Invoke-Bash "$git checkout -q -b '$Branch' --track 'origin/$Branch'" -Directory $InstallDir) "Checking out $Branch"
     }
-    Assert-Exit (Invoke-Bash "$git submodule update --init --recursive" -Directory $InstallDir) 'Fetching the submodules'
+    Invoke-Network "$git submodule update --init --recursive" 'Fetching the submodules' -Directory $InstallDir
     Write-Log ('Sources: ' + (Get-GitLine "log -1 --format='%h %s'"))
 }
 
@@ -521,9 +595,25 @@ $began = Get-Date
 $InstallDir = Resolve-FullPath $InstallDir
 if (-not $Msys2Dir) { $Msys2Dir = if ($env:BB_MSYS2) { $env:BB_MSYS2 } else { 'C:\msys64' } }
 $Msys2Dir = Resolve-FullPath $Msys2Dir
+$zipGone = $null
+if ($GameZip) {
+    $GameZip = Resolve-FullPath $GameZip
+    if ($GameZip.Contains('"')) { Fail "-GameZip must not contain double quotes: $GameZip" }
+    if (-not $GameDir) {
+        $parent = Split-Path $InstallDir -Parent
+        if (-not $parent) { Fail 'Pass -GameDir for the extracted game.' }
+        $GameDir = Join-Path $parent ([IO.Path]::GetFileNameWithoutExtension($GameZip))
+    }
+    if (-not (Test-Path -LiteralPath $GameZip -PathType Leaf)) {
+        # An update after the zip was deleted: the game extracted the first time is enough.
+        if (-not (Test-Path -LiteralPath (Join-Path (Resolve-FullPath $GameDir) 'eboot.bin'))) { Fail "-GameZip: no file $GameZip" }
+        $zipGone = $GameZip
+        $GameZip = ''
+    }
+}
 if (-not $GameDir) {
     $remembered = Join-Path $InstallDir 'out\game_dir.txt'
-    if (-not (Test-Path $remembered)) { Fail 'Pass -GameDir (the folder of your Bloodborne dump).' }
+    if (-not (Test-Path $remembered)) { Fail 'Pass -GameDir (the folder of your Bloodborne dump) or -GameZip.' }
     $GameDir = (Get-Content -Raw $remembered).Trim()
 }
 $GameDir = Resolve-FullPath $GameDir
@@ -549,12 +639,15 @@ try {
     Write-Log "bbport deployment $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
     Write-Log "Install: $InstallDir"
     Write-Log "Game:    $GameDir"
+    if ($GameZip) { Write-Log "         from $GameZip" }
+    if ($zipGone) { Write-Log "         (extracted before; $zipGone is gone)" }
     Write-Log "MSYS2:   $Msys2Dir"
     Write-Log "Sources: $Repo ($Branch)"
     Write-Log "Log:     $logPath"
 
     Write-Step 'System and game folder'
     Test-System
+    if ($GameZip) { Expand-Game }
     Test-GameDir
     $freshMsys2 = -not (Test-Path (Join-Path $Msys2Dir 'usr\bin\bash.exe'))
     Assert-FreeSpace $InstallDir $InstallSpaceGB 'Install folder'
