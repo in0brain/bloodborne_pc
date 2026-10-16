@@ -19,7 +19,7 @@
 
 **只在本仓库：**
 
-- 部署脚本 `tools/deploy_windows.ps1`：不弹窗、不提问地准备 MSYS2 依赖、克隆、构建，并检查游戏能否启动。`configs/keymap-in0brain.ini` 是为亚洲版准备的键鼠布局，用 `-Settings` 写入 `bbport.ini`。
+- 部署脚本 `tools/deploy_windows.ps1`：不弹窗、不提问地准备 MSYS2 依赖、克隆、构建，并检查游戏能否启动。`configs/keymap-in0brain.ini` 是为亚洲版准备的键鼠布局，用 `-Settings` 写入 `bbport.ini`。游戏本体是 zip（例如从网盘下载的备份）时，用 `-GameZip` 先解压再部署，一步步的说明见 [docs/DEPLOY_WINDOWS.zh.md](docs/DEPLOY_WINDOWS.zh.md)。
 
 **进行中（尚未发布）：**
 
@@ -292,19 +292,26 @@ there (no installer, no administrator rights), installs the packages below, clon
 game window (`bb-probe.exe --vulkan-only` loads the DLLs and runs a Vulkan submission; the
 launcher's dry run prepares the game image and the patches) and, with `-SmokeTest`, starts the
 game and closes it after 30 s of frames (the logos and the title screen). The script needs no
-checkout, so it can be downloaded alone:
+checkout, so it can be downloaded alone (`<install folder>` and `<game folder>` stand for your
+paths):
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -File deploy_windows.ps1 -InstallDir D:\Games\bbport -GameDir D:\Games\CUSA03173 -SmokeTest
+powershell -NoProfile -ExecutionPolicy Bypass -File deploy_windows.ps1 -InstallDir <install folder> -GameDir <game folder> -SmokeTest
 ```
 
-An `-Msys2Dir` of its own (e.g. `D:\Games\msys64`) tests the dependencies from nothing and leaves
-an existing MSYS2 alone; an existing MSYS2 is updated only when packages are missing (or with
+With the game as a zip, [docs/DEPLOY_WINDOWS.zh.md](docs/DEPLOY_WINDOWS.zh.md) (Chinese) goes
+through it step by step: one folder holding the script and `game.zip`, one command that runs
+there unchanged, then `bbport\Bloodborne.cmd`.
+
+An `-Msys2Dir` of its own (e.g. `.\msys64` beside the install folder) tests the dependencies from
+nothing and leaves an existing MSYS2 alone; an existing MSYS2 is updated only when packages are missing (or with
 `-UpdateMsys2`). Run it again to update the copy (fast-forward only). The output is also in
 `logs\deploy-*.log`; git and pacman take a proxy from `HTTPS_PROXY`. `-Settings FILE` writes a
 file's `key=value` lines into the copy's `bbport.ini` (keys there are replaced, the rest stays);
 `configs\keymap-in0brain.ini` is a keyboard and mouse layout made for the Asia dump (Circle
-confirms; swap `key_cross` and `key_circle` for a US or EU dump).
+confirms; swap `key_cross` and `key_circle` for a US or EU dump). `-GameZip FILE` takes the dump
+as a .zip (e.g. a backup from a cloud drive) and extracts it first, to `-GameDir` or a folder
+named after the zip beside the install folder; the zip may hold the dump's files or its folder.
 
 1. Install MSYS2 to `C:\msys64` (another folder: set `BB_MSYS2`) and, in an MSYS2 shell, update it
    (`pacman -Syu`, again until nothing is left to do) and install the packages:
