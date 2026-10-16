@@ -219,7 +219,8 @@ pass), `BB_FSR4_PROFILE=1` (GPU time per FSR 4 pass), `BB_UPSCALER=taa|fsr3|fsr4
 0 = unbounded), `BB_PRESENT_THREAD=0` (present on the vblank thread, as before),
 `BB_LIVE_RES=1` (live resolution changes instead of the startup patch for outputs other than 1080p),
 `BB_PAD_RECORD=file` / `BB_PAD_REPLAY=file` (record a route with F9, replay it in scripted tests),
-`BB_MENU_PROBE=1` (the mouse in menus, a prototype: a menu frees the mouse, pointing at an item or
+`BB_MENU_PROBE=1` (the mouse in menus, a prototype; the launcher sets it unless it is set, so
+`BB_MENU_PROBE=0` turns it off: a menu frees the mouse, pointing at an item or
 an option's value selects it, in one jump in the game's lists, the left button confirms, the right
 one cancels; a click on an option's arrows or slider, a quantity's arrows or a level-up attribute's
 number changes it; F7 writes the game's live menu objects to `logs/menu-probe-*.txt`, F8 its next

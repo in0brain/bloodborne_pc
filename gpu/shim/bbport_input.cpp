@@ -5,7 +5,9 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -36,6 +38,13 @@ constexpr size_t WheelQueueMax = 6;
 // A second input pressing a control another input already holds (Space while the side button
 // sprints) presses it again: released this long first, as a quick double tap on a pad.
 constexpr Uint64 RepressNs = 50'000'000;
+// The device in use decides the free cursor: a pad's button, a stick pushed or a trigger pulled
+// past this (of 32767; drift stays below) hides it; a key, a click, the wheel or a mouse move
+// of MouseMoveMin points shows it. Motion this soon after the capture changes or the pointer is
+// warped onto a menu's selection is SDL's, not the player's.
+constexpr int PadAxisPress = 12000;
+constexpr float MouseMoveMin = 2.0f;
+constexpr Uint64 SyntheticMotionNs = 200'000'000;
 
 struct Binding {
     int trigger;
@@ -59,6 +68,10 @@ float motion_x = 0.0f, motion_y = 0.0f;
 std::atomic<uint32_t> probe_requests{0}, trace_requests{0}; // F7, F8: menu probe and trace (runtime_menu.c)
 std::atomic<float> pointer_x{0.0f}, pointer_y{0.0f};
 std::atomic<int> window_w{0}, window_h{0};
+// Window thread only: Observe() and UpdateCapture().
+bool pad_in_use = false;     // the last input came from a pad: the cursor is hidden
+bool cursor_hidden = false;  // SDL_HideCursor() is in effect
+Uint64 motion_quiet_until = 0;
 
 std::once_flag parsed;
 std::vector<Binding> bindings[BBGPU_PAD_CONTROL_COUNT];
@@ -222,6 +235,13 @@ uint32_t WheelControls(Uint64 now) {
     return wheel_held;
 }
 
+void UsePad(bool pad) {
+    if (pad != pad_in_use) {
+        pad_in_use = pad;
+        std::printf("Input: %s\n", pad ? "a pad is in use: the cursor hides" : "keyboard and mouse in use: the cursor shows");
+    }
+}
+
 } // namespace
 
 void Observe(const SDL_Event& event) {
@@ -237,6 +257,7 @@ void Observe(const SDL_Event& event) {
             std::printf("Input: mouse camera %s (F1)\n", now_released ? "released" : "captures the mouse again");
         }
         if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
+            UsePad(false);
             if (event.key.key == SDLK_F7) {
                 ++probe_requests;
             } else if (event.key.key == SDLK_F8) {
@@ -250,6 +271,7 @@ void Observe(const SDL_Event& event) {
             const uint32_t bit = 1u << (event.button.button - 1);
             if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
                 mouse_buttons.fetch_or(bit);
+                UsePad(false);
             } else {
                 mouse_buttons.fetch_and(~bit);
                 mouse_ignored.fetch_and(~bit);
@@ -259,6 +281,9 @@ void Observe(const SDL_Event& event) {
     case SDL_EVENT_MOUSE_WHEEL: {
         // The step's control is decided now, with the modifiers held at this moment.
         const float y = event.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -event.wheel.y : event.wheel.y;
+        if (y != 0.0f) {
+            UsePad(false);
+        }
         if (y == 0.0f || !(captured || menu_active)) {
             break;
         }
@@ -279,6 +304,19 @@ void Observe(const SDL_Event& event) {
             motion_x += event.motion.xrel;
             motion_y += event.motion.yrel;
         }
+        if (std::fabs(event.motion.xrel) + std::fabs(event.motion.yrel) >= MouseMoveMin &&
+            SDL_GetTicksNS() >= motion_quiet_until) {
+            UsePad(false);
+        }
+        break;
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+    case SDL_EVENT_GAMEPAD_TOUCHPAD_DOWN:
+        UsePad(true);
+        break;
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+        if (std::abs(int(event.gaxis.value)) >= PadAxisPress) {
+            UsePad(true);
+        }
         break;
     case SDL_EVENT_WINDOW_FOCUS_LOST:
         // Keys released elsewhere send no event here.
@@ -298,6 +336,16 @@ void UpdateCapture(SDL_Window* window, bool text_entry) {
         window_w = w;
         window_h = h;
     }
+    // The free cursor (menus, F1, the settings menu) is for the keyboard and mouse: while a pad
+    // plays it stays hidden, until a key, a click, the wheel or a mouse move.
+    if (pad_in_use != cursor_hidden) {
+        cursor_hidden = pad_in_use;
+        if (cursor_hidden) {
+            SDL_HideCursor();
+        } else {
+            SDL_ShowCursor();
+        }
+    }
     const bool want = BbSettings::Get().mouse_camera && !released && !text_entry && !menu_active &&
                       !BbOverlay::CapturesInput() && (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS);
     if (want == captured.load()) {
@@ -313,6 +361,7 @@ void UpdateCapture(SDL_Window* window, bool text_entry) {
     if (!want && warp_pending.exchange(false)) {
         SDL_WarpMouseInWindow(window, warp_x, warp_y);
     }
+    motion_quiet_until = SDL_GetTicksNS() + SyntheticMotionNs;
 }
 
 bool Captured() {
