@@ -28,8 +28,9 @@
          device runs a submission) and the launcher's dry run (BB_DRY_RUN=1: the game image and
          the patches are prepared, the game is not started).
       9. -SmokeTest: starts the game, waits until it has rendered for 30 s (the logos and the
-         title screen; "Frame stats" lines in logs\bbport-*.log), then closes it. Leave the
-         window open meanwhile.
+         title screen; "Frame stats" lines in logs\bbport-*.log), then closes it, and says
+         whether the title menu took the mouse (the cursor in menus). Leave the window open
+         meanwhile.
 
     Everything printed also goes to <InstallDir>\logs\deploy-<time>.log. Run it again to update.
     git and pacman in MSYS2 take a proxy from HTTPS_PROXY / HTTP_PROXY, not from Windows.
@@ -575,6 +576,12 @@ function Test-Game {
     if ($passed) {
         Write-Log ('Smoke test passed: the game rendered for {0} s, {1:N0} s after the start; closed it.' -f
             (5 * $renderReports), ((Get-Date) - $started).TotalSeconds) Green
+        # The title screen is a menu: it takes the mouse from the camera and shows the cursor
+        # (runtime_menu.c). Without the menu mouse the cursor stays hidden in every menu.
+        $text = Read-Shared $log.FullName
+        if ($text -match 'Input: a menu takes the mouse') { Write-Log 'Menu mouse: the title menu took the mouse; the cursor shows in menus.' }
+        elseif ($text -notmatch 'Menu mouse: on') { Write-Log 'Menu mouse: off (BB_MENU_PROBE=0?): menus will keep the mouse hidden.' Yellow }
+        else { Write-Log 'Menu mouse: on, but no menu took the mouse during the test.' Yellow }
         return
     }
     Write-Log 'Smoke test failed. The end of the launcher output:' Red

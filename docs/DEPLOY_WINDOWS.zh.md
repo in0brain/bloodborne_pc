@@ -126,7 +126,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy_windows.ps1 -Instal
 | `6. Launcher and settings` | 生成启动文件 `Bloodborne.cmd`，写入设置 | 瞬间 |
 | `7. Vulkan and DLLs` | 不开窗口地检查程序能否加载、显卡能否工作，看到 `PASS` 即正常 | 几秒 |
 | `8. Launcher dry run` | 准备游戏镜像和补丁，但不启动游戏 | 十几秒 |
-| `9. Smoke test` | **会弹出游戏窗口**，渲染约 30 秒后自动关闭 | 约 40 秒 |
+| `9. Smoke test` | **会弹出游戏窗口**，渲染约 30 秒后自动关闭；再检查标题菜单有没有接管鼠标（`Menu mouse: the title menu took the mouse`，说明菜单里会显示箭头） | 约 40 秒 |
 
 > **第 9 步弹出游戏窗口后，请不要关闭它，也不用操作。** 脚本会自己关掉。手动关闭会导致测试失败（`The game window was closed during the test`），重新运行一次命令即可。
 
@@ -168,10 +168,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy_windows.ps1 -Instal
 | 按键 | 作用 |
 |---|---|
 | `Insert`（手柄 L3+R3） | 打开 bbport 设置菜单：分辨率、画质、超分、键鼠按键 |
+| 鼠标（游戏菜单里） | 指向即选中，左键确认，右键返回 |
 | `F11` | 切换全屏 / 窗口 |
 | `F1` | 释放 / 重新捕获鼠标 |
+| `F7` / `F8` | 开发者诊断用（记录菜单信息，游戏会停顿一下），平时不用按 |
 
-手柄插上就能用；键盘鼠标的按键可以在设置菜单里修改。
+手柄插上就能用；键盘鼠标的按键可以在设置菜单里修改。用键盘鼠标时，菜单里会显示箭头；用手柄时箭头自动隐藏，动一下鼠标、点一下或按任意键就会重新出现。手柄这部分还没有实测：如果箭头该出现时不出现、或者用手柄时还在，请附上 `bbport\logs\` 里最新的 `bbport-*.log` 反馈（里面以 `Input:` 开头的行记录了每次切换）。
 
 ---
 
