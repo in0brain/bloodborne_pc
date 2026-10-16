@@ -1,3 +1,37 @@
+# bbport · in0brain 的 fork
+
+本仓库 fork 自 **[yumlevi/bloodborne_pc](https://github.com/yumlevi/bloodborne_pc)**（`windows-port` 分支）。项目介绍、构建和运行方法见下方保留的上游 README（英文），以及上游仓库。
+
+## 我们的贡献
+
+**已合并到本仓库，并已向上游提交 PR（等待合并）：**
+
+- **键鼠操作和菜单**（[PR #7](https://github.com/yumlevi/bloodborne_pc/pull/7)）
+  - 鼠标直接转动游戏镜头，1:1，不模拟右摇杆；锁定时仍由游戏瞄准，望远镜单独处理。
+  - `bbport.ini` 的 `key_*` 键位：一个操作可以绑多个输入，支持组合键（如 `shift+mouse_left`）、鼠标按键和滚轮，另有走路键。启动器和游戏内的设置菜单里也能改。
+  - 确认键 `enter_button=auto|circle|cross`：`auto` 按游戏区域决定，日版、亚洲版、韩版用 ○ 确认。
+  - 菜单鼠标点选（`BB_MENU_PROBE=1` 开启）：指向即选中，左键确认、右键返回；选项值、滑块、下拉框、文本框、商店数量、升级属性都能用鼠标操作；自带光标，任何窗口大小和分辨率都能用。用键盘或滚轮移动选项后，鼠标一动，选中项就回到鼠标所指的地方。
+  - 修复游戏文本输入框打开时按键或点击导致的闪退；输入时屏幕上显示正在输入的文字，支持系统输入法。
+  - 其他修复：MSYS2 clang/libc++ 23 下的构建、窗口最小化时退出、渲染线程丢失 record chunk 时的闪退（exit 139）。
+- **减少着色器编译卡顿**（[PR #8](https://github.com/yumlevi/bloodborne_pc/pull/8)）
+  - 物体运动向量的着色器变体可以跨会话保存在管线缓存里；启动时被缓存拒绝的管线从 116 个降到 11–14 个。
+  - 新的着色器和管线提前在工作线程上并行编译，GPU 线程少等。
+
+**只在本仓库：**
+
+- 部署脚本 `tools/deploy_windows.ps1`：不弹窗、不提问地准备 MSYS2 依赖、克隆、构建，并检查游戏能否启动。`configs/keymap-in0brain.ini` 是为亚洲版准备的键鼠布局，用 `-Settings` 写入 `bbport.ini`。
+
+**进行中（尚未发布）：**
+
+- 8 GB 显存的显卡玩久了显存上涨、闪退：按用途统计显存，释放不再使用的游戏缓冲，按驱动给的预算回收贴图（8 GB 显卡默认上限 6 GB）。
+- 另一种偶发的 exit 139 闪退（GPU 命令线程和录制线程之间的竞争）。
+
+感谢Claude小姐的编码。
+
+---
+
+*以下为上游 README 原文。*
+
 # bbport — a native Linux port of Bloodborne
 
 **English** · [Русский](README.ru.md)
