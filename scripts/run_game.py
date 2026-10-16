@@ -132,6 +132,25 @@ def configured_live_resolution(config):
     return value
 
 
+def write_default_keys(config):
+    """A missing bbport.ini gets the table's keyboard and mouse lines (their defaults): keys are
+    set there, not in a menu, so a player has to find the file. The other settings keep the
+    table's defaults until the game saves the file."""
+    if os.path.exists(config):
+        return
+    try:
+        text = (ROOT / 'scripts' / 'bbport_settings_table.inc').read_text(encoding='utf-8')
+        lines = ['# bbport settings (in-game menu: Insert / L3+R3). Keys and mouse buttons are the key_* lines;',
+                 '# docs/DEPLOY_WINDOWS.zh.md explains them. Edit with the game closed; a new start reads them.']
+        lines += [f'{key}={value}' for key, value in
+                  re.findall(r'^BB_SETTING\("((?:mouse_|key_)\w+|walk_stick)", "([^"]*)"\)', text, re.M)]
+        Path(config).write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    except OSError as error:
+        print(f'{config}: {error.strerror}; the keys keep their defaults', file=sys.stderr)
+        return
+    print(f'Settings: wrote {config} with the default keys (key_* lines)')
+
+
 def enter_button(config, game):
     """The confirm button, circle or cross: bbport.ini enter_button, where auto follows the dump's
     region as that region's consoles are set up (Japan, Asia and Korea confirm with circle; those
@@ -340,6 +359,7 @@ def main():
     out = os.path.join(data, 'out')
     os.makedirs(out, exist_ok=True)
     os.environ['BB_CONFIG'] = config = env('BB_CONFIG', os.path.join(data, 'bbport.ini'))
+    write_default_keys(config)
     # FSR 4.1.1 assets (tools/fsr4cap/build_assets.sh): in the port's folder or the data folder.
     if not env('BB_FSR411_DIR') and not os.path.isdir('fsr4_411') and os.path.isdir(os.path.join(data, 'fsr4_411')):
         os.environ['BB_FSR411_DIR'] = os.path.join(data, 'fsr4_411')

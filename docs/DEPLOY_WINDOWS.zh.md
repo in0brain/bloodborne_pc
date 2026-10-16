@@ -125,7 +125,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy_windows.ps1 -Instal
 | `5. Build` | 编译 bbport，期间几分钟没有新输出是正常的 | 几分钟，CPU 越快越短 |
 | `6. Launcher and settings` | 生成启动文件 `Bloodborne.cmd`，写入设置 | 瞬间 |
 | `7. Vulkan and DLLs` | 不开窗口地检查程序能否加载、显卡能否工作，看到 `PASS` 即正常 | 几秒 |
-| `8. Launcher dry run` | 准备游戏镜像和补丁，但不启动游戏 | 十几秒 |
+| `8. Launcher dry run` | 准备游戏镜像和补丁，但不启动游戏；第一次还会生成写好默认键位的 `bbport.ini`（`Settings: wrote ...`） | 十几秒 |
 | `9. Smoke test` | **会弹出游戏窗口**，渲染约 30 秒后自动关闭；再检查标题菜单有没有接管鼠标（`Menu mouse: the title menu took the mouse`，说明菜单里会显示箭头） | 约 40 秒 |
 
 > **第 9 步弹出游戏窗口后，请不要关闭它，也不用操作。** 脚本会自己关掉。手动关闭会导致测试失败（`The game window was closed during the test`），重新运行一次命令即可。
@@ -154,7 +154,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy_windows.ps1 -Instal
 ├─ msys64\             ← 编译环境
 └─ bbport\
    ├─ Bloodborne.cmd   ← 双击开始游戏
-   ├─ bbport.ini       ← 设置（游戏保存设置时生成；用了 -Settings 时部署就会生成）
+   ├─ bbport.ini       ← 设置和键位（部署时生成，改键位见第 8 节）
    ├─ user\            ← 存档
    └─ logs\            ← 日志
 ```
@@ -167,17 +167,80 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy_windows.ps1 -Instal
 
 | 按键 | 作用 |
 |---|---|
-| `Insert`（手柄 L3+R3） | 打开 bbport 设置菜单：分辨率、画质、超分、键鼠按键 |
+| `Insert`（手柄 L3+R3） | 打开 bbport 设置菜单：分辨率、画质、超分、鼠标灵敏度（按键不在这里改，见第 8 节） |
 | 鼠标（游戏菜单里） | 指向即选中，左键确认，右键返回 |
 | `F11` | 切换全屏 / 窗口 |
 | `F1` | 释放 / 重新捕获鼠标 |
 | `F7` / `F8` | 开发者诊断用（记录菜单信息，游戏会停顿一下），平时不用按 |
 
-手柄插上就能用；键盘鼠标的按键可以在设置菜单里修改。用键盘鼠标时，菜单里会显示箭头；用手柄时箭头自动隐藏，动一下鼠标、点一下或按任意键就会重新出现。手柄这部分还没有实测：如果箭头该出现时不出现、或者用手柄时还在，请附上 `bbport\logs\` 里最新的 `bbport-*.log` 反馈（里面以 `Input:` 开头的行记录了每次切换）。
+手柄插上就能用；键盘鼠标的按键见[第 8 节](#8-修改键位)。用键盘鼠标时，菜单里会显示箭头；用手柄时箭头自动隐藏，动一下鼠标、点一下或按任意键就会重新出现。手柄这部分还没有实测：如果箭头该出现时不出现、或者用手柄时还在，请附上 `bbport\logs\` 里最新的 `bbport-*.log` 反馈（里面以 `Input:` 开头的行记录了每次切换）。
 
 ---
 
-## 8. 以后更新
+## 8. 修改键位
+
+键盘和鼠标的按键都在 **`<部署目录>\bbport\bbport.ini`** 这个文件里设置。游戏内的设置菜单（`Insert`）里只能调鼠标镜头的开关、灵敏度、垂直反转和走路力度（`Keyboard and mouse` 一栏），**不能改按键**。
+
+**修改步骤：**
+
+1. **先关闭游戏。** 游戏运行时，如果你在设置菜单里改了别的选项，游戏会重写这个文件，你手动改的内容可能被覆盖。
+2. 用记事本打开 `<部署目录>\bbport\bbport.ini`。部署完成后就有这个文件，里面已经写好了全部按键的默认值（以后启动游戏时如果发现没有这个文件，也会自动生成一份）。
+3. 找到要改的那一行（都以 `key_` 开头，对照下面的表），修改等号右边的内容。
+4. 保存文件，重新启动游戏就生效。
+
+**每一行的写法：**
+
+- 一行对应 PS4 手柄上的一个键：`key_手柄键=输入`，例如 `key_square=e` 表示按 E 键等于按手柄的 □。
+- 一个键可以绑多个输入，用英文逗号隔开，任意一个都算：`key_r1=3,mouse_left`。
+- 组合键：在输入前面加 `shift+`、`ctrl+` 或 `alt+`，表示要同时按住：`key_r2=shift+mouse_left`。按 Shift+左键时，组合键优先，不会同时触发单独的左键。
+- 等号两边、逗号前后都不要加中文或全角符号。
+
+**输入的名字：**
+
+| 输入 | 写法 |
+|---|---|
+| 字母、数字键 | 小写字母或数字，例如 `f`、`2` |
+| 常用键 | `space`（空格）、`tab`、`return`（回车）、`backspace`（退格）、`left_shift`、`right_shift`、`left_ctrl`、`left_alt`、`up` `down` `left` `right`（方向键） |
+| 鼠标按键 | `mouse_left`（左键）、`mouse_right`（右键）、`mouse_middle`（中键）、`mouse_x1`（侧键，靠后）、`mouse_x2`（侧键，靠前） |
+| 滚轮 | `wheel_up`、`wheel_down`（每滚一格按一下） |
+
+其他键的名字是英文键名的小写，空格换成下划线。`F1`（释放鼠标）、`F7`/`F8`（诊断）、`F11`（全屏）、`Insert`（设置菜单）已经有固定用途，建议不要再绑。
+
+**对照表（等号左边）：**
+
+| 行 | PS4 手柄键 | 默认的键盘 / 鼠标 |
+|---|---|---|
+| `key_cross` | × | 空格 |
+| `key_circle` | ○ | 左 Shift |
+| `key_square` | □ | E |
+| `key_triangle` | △ | Q |
+| `key_l1` | L1 | 1 |
+| `key_r1` | R1 | 3、鼠标左键 |
+| `key_l2` | L2 | R、鼠标右键 |
+| `key_r2` | R2 | F、Shift + 鼠标左键 |
+| `key_l3` | L3（按下左摇杆） | Z |
+| `key_r3` | R3（按下右摇杆） | C、鼠标中键、左 Alt |
+| `key_options` | OPTIONS | 回车 |
+| `key_dpad_up` / `_down` / `_left` / `_right` | 方向键 上 / 下 / 左 / 右 | I / K / J / L |
+| `key_touchpad_left` / `_right` | 触摸板左半 / 右半 | Tab / 退格 |
+| `key_move_up` / `_down` / `_left` / `_right` | 左摇杆（移动） | W / S / A / D |
+| `key_camera_up` / `_down` / `_left` / `_right` | 右摇杆（转镜头） | 方向键 ↑ / ↓ / ← / → |
+| `key_walk` | 按住时移动变成走路 | 左 Ctrl |
+
+每个键在游戏里的作用和用 PS4 手柄玩时一样。注意：亚洲版、日版（例如 CUSA03023）用 ○ 确认和互动、× 闪避；美版、欧版正好相反。
+
+**例子：**
+
+- 让鼠标靠后的侧键也能按 ×：`key_cross=space,mouse_x1`
+- 用鼠标靠前的侧键代替 1 键按 L1：`key_l1=mouse_x2`
+
+**恢复默认：** 删掉某一行，这个键就恢复默认；删掉整个 `bbport.ini`，所有设置都恢复默认（下次启动游戏时会重新生成一份写好默认键位的文件）。
+
+**现成的布局：** `<部署目录>\bbport\configs\keymap-in0brain.ini` 是作者为亚洲版准备的一套键鼠布局，各键的作用写在文件开头。可以把里面的行复制进 `bbport.ini`，也可以在第 5 步的命令末尾加上 `-Settings configs\keymap-in0brain.ini`，让脚本自动写入。
+
+---
+
+## 9. 以后更新
 
 在 `<部署目录>` 打开 PowerShell（第 4 步），再运行一次第 5 步的**同一条命令**。脚本会：
 
