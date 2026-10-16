@@ -130,7 +130,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy_windows.ps1 -Instal
 
 > **第 9 步弹出游戏窗口后，请不要关闭它，也不用操作。** 脚本会自己关掉。手动关闭会导致测试失败（`The game window was closed during the test`），重新运行一次命令即可。
 
-中间偶尔出现黄色的 `... failed (exit code N); trying again (2/3)` 是网络断了一下，脚本正在自动重试，不用管。另外 `CMake Warning` 和 `warning: ...` 开头的行也都是正常输出。
+下面这些输出都是正常的，不用管：
+
+- 黄色的 `... failed (exit code N); trying again (2/3)`：网络断了一下，脚本正在自动重试。
+- 第 3 步中的 `错误：无法从 mirror.msys2.org ... 404 获取文件 ...`，以及 `警告：mirror.msys2.org 返回错误过多，将在此事务的剩余部分中跳过`（英文系统上是 `error: failed retrieving file ... 404` 和 `... too many errors`）：某个镜像还没同步到最新的软件包，pacman 会自动换其他镜像继续下载。只要后面没有出现红色的 `FAILED:`，就说明已经下载成功。
+- `CMake Warning` 开头的段落，以及 `warning: ...` 开头的行。
 
 最后看到绿色的 `Done in N min. Start the game with ...\bbport\Bloodborne.cmd` 就是部署成功。
 
@@ -222,6 +226,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy_windows.ps1 -Instal
 | `Downloading MSYS2 failed`、`Updating MSYS2 failed`、`Installing the MSYS2 packages failed`、`Fetching https://... failed`、`Fetching the submodules failed`、`Updating the sources failed` | 网络问题。脚本已经自动重试过（下载 MSYS2 时最多 5 次并断点续传，其他步骤 3 次），仍然失败。重新运行同一条命令即可：已经完成的部分不会重做，下载到一半的也会接着下。网络需要代理时，先在同一个窗口里运行 `$env:HTTPS_PROXY = 'http://127.0.0.1:<代理端口>'`（`<代理端口>` 换成你代理软件的 HTTP 端口），再运行第 5 步的命令 |
 | `The build ... failed` | 编译失败。把 `bbport\logs\deploy-*.log` 和 `bbport\out\gpu-build.log` 发给开发者 |
 | `bb-probe.exe --vulkan-only failed` | 程序无法启动或显卡不支持。更新显卡驱动；日志里列出的缺失 DLL 一并附上求助 |
+| `The launcher dry run (run.bat) failed` | 准备游戏镜像或补丁时出错，具体原因在它上面一行。如果那一行是 `prepare failed: 'gbk' codec can't encode character '™'`，说明代码是 2026-10-16 修复中文系统编码问题之前的版本：重新运行一次第 5 步的命令，脚本会自动更新代码后继续。其他原因请连同上面那一行和日志一起求助 |
 | `The game window was closed during the test` | 测试时游戏窗口被关掉了。重新运行命令，测试时别动窗口 |
 | `The game ended after ... frame reports` 或 `Fewer than 6 frame reports ...` | 游戏启动了但没能正常显示画面。附上 `bbport\logs\` 下最新的 `bbport-*.log` 求助 |
 
